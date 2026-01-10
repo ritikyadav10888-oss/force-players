@@ -1,0 +1,112 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // --- Helper Functions ---
+
+    // Check if user is authenticated
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    // Check if the current user is an Owner (via Custom Claims or Document)
+    function isOwner() {
+      let claimRole = request.auth.token.get('role', 'guest').lower();
+      let docRole = getUserRole().lower();
+      return isSignedIn() && (
+        claimRole == 'owner' || 
+        claimRole == 'admin' || 
+        docRole == 'owner' || 
+        docRole == 'admin' ||
+        (request.auth.token.email != null && (
+          request.auth.token.email == 'ritikyadav10888@gmail.com' ||
+          request.auth.token.email == 'priyanshu.force@gmail.com'
+        ))
+      );
+    }
+    
+    // Check if the current user is an Organizer (via Custom Claims or Document)
+    function isOrganizer() {
+      let claimRole = request.auth.token.get('role', 'guest').lower();
+      let docRole = getUserRole().lower();
+      return isSignedIn() && (claimRole == 'organizer' || docRole == 'organizer');
+    }
+
+    // Legacy support for document-based roles (if claims are not yet set)
+    function getUserRole() {
+      let userDoc = get(/databases/$(database)/documents/users/$(request.auth.uid));
+      return userDoc != null ? userDoc.data.role : 'guest';
+    }
+
+
+    // --- Collection Rules ---
+
+    // 1. Users Collection
+    match /users/{userId} {
+      allow read: if isSignedIn() && (request.auth.uid == userId || isOwner());
+      allow create: if (isSignedIn() && request.auth.uid == userId && (request.resource.data.role == 'player' || !('role' in request.resource.data))) || isOwner();
+      
+      // PROTECT SENSITIVE FIELDS: Users can update name/phone, but NEVER roles or access dates
+      allow update: if isOwner() || (
+        isSignedIn() && request.auth.uid == userId && 
+        request.resource.data.role == resource.data.role &&
+        (!('accessExpiryDate' in request.resource.data) || request.resource.data.accessExpiryDate == resource.data.accessExpiryDate) &&
+        (!('isVerified' in request.resource.data) || request.resource.data.isVerified == resource.data.isVerified)
+      );
+    }
+
+    // 2. Tournaments Collection
+    match /tournaments/{tournamentId} {
+      allow read: if true;
+      allow create: if isOwner();
+      
+      // PROTECT FINANCIAL FIELDS: Organizers can update logistics, but NOT money/fees
+      allow update: if isOwner() || (
+        isOrganizer() && resource.data.organizerId == request.auth.uid &&
+        request.resource.data.organizerId == resource.data.organizerId &&
+        (!('entryFee' in request.resource.data) || request.resource.data.entryFee == resource.data.entryFee) &&
+        (!('prizePool' in request.resource.data) || request.resource.data.prizePool == resource.data.prizePool)
+      );
+      allow delete: if isOwner();
+
+
+      // Subcollection: Players (Registrations)
+      match /players/{playerId} {
+        // Authenticated users can register
+        // Allow both paid=false (pending) and paid=true (immediate payment)
+        allow create: if isSignedIn();
+        
+        // Read: 
+        // - Owners and assigned Organizers
+        // - The player themselves (if we match by email/uid)
+        allow read: if isOwner() 
+                    || (isOrganizer() && get(/databases/$(database)/documents/tournaments/$(tournamentId)).data.organizerId == request.auth.uid)
+                    || (isSignedIn() && (request.auth.uid == resource.data.userId || (request.auth.token.email != null && request.auth.token.email == resource.data.email)));
+
+        // Update:
+        // - Owners/Organizers can manage registrations
+        // - Players can update their details AND update 'paid' status (client-side payment flow)
+        allow update: if isOwner() 
+                    || (isOrganizer() && get(/databases/$(database)/documents/tournaments/$(tournamentId)).data.organizerId == request.auth.uid)
+                    || (isSignedIn() && (request.auth.uid == resource.data.userId || (request.auth.token.email != null && request.auth.token.email == resource.data.email)));
+        
+        allow delete: if isOwner();
+      }
+
+    }
+
+    // 3. Master Players List (Data Deduplication)
+    match /master_players/{playerEmail} {
+      // Create: Allow authenticated users (including anonymous) to create records
+      allow create: if isSignedIn();
+      
+      // Update: Allow authenticated users to update records (simplified for anonymous access)
+      allow update: if isOwner() || isSignedIn();
+
+      
+      // Read: Restricted to Owners or authenticated users
+      allow read: if isOwner() || isSignedIn();
+    }
+  }
+}

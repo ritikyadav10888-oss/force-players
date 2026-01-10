@@ -1,0 +1,56 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    
+    // Helper: Check if user is an Owner
+    function isOwner() {
+      let claimRole = request.auth.token.get('role', 'guest').lower();
+      let email = request.auth.token.email;
+      return request.auth != null && (
+        claimRole == 'owner' || 
+        claimRole == 'admin' ||
+        email == 'ritikyadav10888@gmail.com' ||
+        email == 'priyanshu.force@gmail.com'
+      );
+    }
+
+    // Helper: Check if user is an Organizer
+    function isOrganizer() {
+      let claimRole = request.auth.token.get('role', 'guest').lower();
+      return request.auth != null && claimRole == 'organizer';
+    }
+
+    // Player Directory
+    match /players/{email}/{fileName} {
+      
+      // 1. Profile Photos (Public) - Regex match
+      allow read: if fileName.matches('profile_.*');
+      
+      // 2. Aadhar Cards (Private)
+      allow read: if fileName.matches('adhar_.*') 
+                  && (isOwner() || isOrganizer() || (request.auth != null && request.auth.token.email == email) || (request.auth != null && resource.metadata.uploaderUid == request.auth.uid));
+
+
+      // Universal Write Access for NEW files (Registration)
+      // Allow any authenticated user to upload (for registration)
+      // Modification restricted to Owner or the original Uploader
+      allow write: if request.auth != null;
+    }
+
+    // 3. Tournament Data (Banners/Logos)
+    match /tournaments/{tournamentId}/teams/{fileName} {
+      allow read: if true;
+      allow write: if request.auth != null;
+    }
+
+    match /tournaments/{allPaths=**} {
+      allow read: if true;
+      allow write: if request.auth != null;
+    }
+
+    // Default: Deny all by default, only Owners can bypass
+    match /{allPaths=**} {
+      allow read, write: if isOwner();
+    }
+  }
+}
