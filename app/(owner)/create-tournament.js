@@ -407,7 +407,20 @@ export default function CreateTournamentScreen() {
 
             if (params.organizerId) {
                 const preSelected = list.find(o => o.id === params.organizerId);
-                if (preSelected) setSelectedOrganizer(preSelected);
+                if (preSelected) {
+                    setSelectedOrganizer(preSelected);
+                } else {
+                    // Fallback: Fetch organizer directly if not in list
+                    try {
+                        const orgDoc = await getDoc(doc(db, 'users', params.organizerId));
+                        if (orgDoc.exists()) {
+                            const orgData = { id: orgDoc.id, ...orgDoc.data() };
+                            setSelectedOrganizer(orgData);
+                        }
+                    } catch (err) {
+                        console.error('Error fetching organizer:', err);
+                    }
+                }
             }
         } catch (e) {
             console.error(e);

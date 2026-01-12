@@ -132,103 +132,38 @@ export default function CreateOrganizerScreen() {
 
 
     const handleSave = async () => {
+        // 0. Check Authentication
+        if (!user) {
+            Alert.alert('Error', 'You must be logged in to create an organizer.');
+            return;
+        }
+
         // 1. Basic Required Fields
-        if (!name || !name.trim()) {
-            Alert.alert('Validation Error', 'Please enter organizer name');
-            return;
-        }
+        if (!name?.trim()) { Alert.alert('Error', 'Please enter organizer name'); return; }
+        if (!phone?.trim()) { Alert.alert('Error', 'Please enter phone number'); return; }
+        if (!address?.trim()) { Alert.alert('Error', 'Please enter full address'); return; }
+        if (!aadharNumber?.trim()) { Alert.alert('Error', 'Please enter Aadhar number'); return; }
 
-        if (!phone || !phone.trim()) {
-            Alert.alert('Validation Error', 'Please enter phone number');
-            return;
-        }
+        // Bank Details
+        if (!bankDetails.accountNumber?.trim()) { Alert.alert('Error', 'Please enter bank account number'); return; }
+        if (!bankDetails.ifsc?.trim()) { Alert.alert('Error', 'Please enter IFSC code'); return; }
+        if (!bankDetails.bankName?.trim()) { Alert.alert('Error', 'Please enter bank name'); return; }
 
-        // 2. Phone Number Validation (10 digits)
-        const phoneRegex = /^[0-9]{10}$/;
-        if (!phoneRegex.test(phone.replace(/\s/g, ''))) {
-            Alert.alert('Validation Error', 'Please enter a valid 10-digit phone number');
-            return;
-        }
+        // Photos
+        if (!profileImage) { Alert.alert('Error', 'Please upload a profile photo'); return; }
+        if (!aadharImage) { Alert.alert('Error', 'Please upload an Aadhar card photo'); return; }
 
-        // 3. Email and Password (for new organizers only)
+        // Regex Validations
+        const cleanPhone = phone.replace(/[^0-9]/g, '');
+        if (cleanPhone.length < 10 || cleanPhone.length > 12) { alert(`Error: Invalid phone number length (${cleanPhone.length}). Must be 10-12 digits.`); return; }
+
+        const cleanAadhar = aadharNumber.replace(/\s/g, '');
+        if (!/^[0-9]{12}$/.test(cleanAadhar)) { Alert.alert('Error', 'Invalid 12-digit Aadhar number'); return; }
+
         if (!editId) {
-            if (!email || !email.trim()) {
-                Alert.alert('Validation Error', 'Email is required for new organizers');
-                return;
-            }
-
-            // Email format validation
-            const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-            if (!emailRegex.test(email)) {
-                Alert.alert('Validation Error', 'Please enter a valid email address');
-                return;
-            }
-
-            if (!password || password.length < 6) {
-                Alert.alert('Validation Error', 'Password must be at least 6 characters');
-                return;
-            }
-        }
-
-        // 4. Address Validation
-        if (!address || !address.trim()) {
-            Alert.alert('Validation Error', 'Please enter full address');
-            return;
-        }
-
-        // 5. Aadhar Number Validation (12 digits)
-        if (!aadharNumber || !aadharNumber.trim()) {
-            Alert.alert('Validation Error', 'Please enter Aadhar number');
-            return;
-        }
-
-        const aadharRegex = /^[0-9]{12}$/;
-        if (!aadharRegex.test(aadharNumber.replace(/\s/g, ''))) {
-            Alert.alert('Validation Error', 'Aadhar number must be 12 digits');
-            return;
-        }
-
-        // 6. PAN Number Validation (optional but if provided, must be valid)
-        if (panNumber && panNumber.trim()) {
-            const panRegex = /^[A-Z]{5}[0-9]{4}[A-Z]{1}$/;
-            if (!panRegex.test(panNumber.toUpperCase())) {
-                Alert.alert('Validation Error', 'PAN number format is invalid (e.g., ABCDE1234F)');
-                return;
-            }
-        }
-
-        // 7. Image Validations
-        if (!profileImage) {
-            Alert.alert('Validation Error', 'Please upload profile photo');
-            return;
-        }
-
-        if (!aadharImage) {
-            Alert.alert('Validation Error', 'Please upload Aadhar card photo');
-            return;
-        }
-
-        // 8. Bank Details Validation
-        if (!bankDetails.accountNumber || !bankDetails.accountNumber.trim()) {
-            Alert.alert('Validation Error', 'Please enter bank account number');
-            return;
-        }
-
-        if (!bankDetails.ifsc || !bankDetails.ifsc.trim()) {
-            Alert.alert('Validation Error', 'Please enter IFSC code');
-            return;
-        }
-
-        // IFSC format validation (11 characters)
-        const ifscRegex = /^[A-Z]{4}0[A-Z0-9]{6}$/;
-        if (!ifscRegex.test(bankDetails.ifsc.toUpperCase())) {
-            Alert.alert('Validation Error', 'IFSC code format is invalid (e.g., SBIN0001234)');
-            return;
-        }
-
-        if (!bankDetails.bankName || !bankDetails.bankName.trim()) {
-            Alert.alert('Validation Error', 'Please enter bank name');
-            return;
+            if (!email?.trim()) { Alert.alert('Error', 'Email is required'); return; }
+            if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { Alert.alert('Error', 'Invalid email address'); return; }
+            if (!password || password.length < 6) { Alert.alert('Error', 'Password must be at least 6 characters'); return; }
         }
 
         setLoading(true);
@@ -240,14 +175,23 @@ export default function CreateOrganizerScreen() {
             let aadharPhotoUrl = aadharImage;
             let panPhotoUrl = panImage;
 
-            if (profileImage && !profileImage.startsWith('http'))
-                profilePicUrl = await uploadFile(profileImage, `organizers/${timestamp}_profile.jpg`);
+            // Helper to safe upload
+            const safeUpload = async (uri, path, label) => {
+                if (!uri || uri.startsWith('http')) return uri;
+                try {
+                    return await uploadFile(uri, path);
+                } catch (e) {
+                    console.error(`${label} upload failed:`, e);
+                    throw new Error(`Failed to upload ${label}. Please try again.`);
+                }
+            };
 
-            if (aadharImage && !aadharImage.startsWith('http'))
-                aadharPhotoUrl = await uploadFile(aadharImage, `organizers/${timestamp}_aadhar.jpg`);
-
-            if (panImage && !panImage.startsWith('http'))
-                panPhotoUrl = await uploadFile(panImage, `organizers/${timestamp}_pan.jpg`);
+            // Upload Sequentially
+            profilePicUrl = await safeUpload(profileImage, `organizers/${timestamp}_profile.jpg`, "Profile Photo");
+            aadharPhotoUrl = await safeUpload(aadharImage, `organizers/${timestamp}_aadhar.jpg`, "Aadhar Photo");
+            if (panImage) {
+                panPhotoUrl = await safeUpload(panImage, `organizers/${timestamp}_pan.jpg`, "PAN Photo");
+            }
 
             const accessExpiryIso = (() => {
                 const finalDate = new Date(accessExpiryDate);
@@ -256,61 +200,41 @@ export default function CreateOrganizerScreen() {
             })();
 
             if (editId) {
-                // UPDATE EXISTING (Still doing client-side for now, or move to CF too?)
-                // For now, only creation was flagged as insecure client-side admin.
-                // Updating is restricted by rules (Owner only).
                 await updateDoc(doc(db, "users", editId), {
-                    name,
-                    phone,
-                    address,
-                    aadharNumber,
-                    panNumber,
+                    name, phone, address, aadharNumber,
+                    panNumber: panNumber || null,
                     profilePic: profilePicUrl,
                     aadharPhoto: aadharPhotoUrl,
-                    panPhoto: panPhotoUrl,
+                    panPhoto: panPhotoUrl || null,
                     bankDetails,
                     accessExpiryDate: accessExpiryIso,
                 });
                 Alert.alert('Success', 'Organizer updated successfully!');
             } else {
-                // CREATE NEW via Cloud Function
                 const createOrganizer = httpsCallable(functions, 'createOrganizer');
-
-                await createOrganizer({
-                    email,
-                    password,
-                    name,
-                    phone,
-                    address,
-                    aadharNumber,
-                    panNumber,
+                const payload = {
+                    email, password, name, phone, address, aadharNumber,
+                    panNumber: panNumber || null, // Explicitly pass null if empty
                     profilePic: profilePicUrl,
                     aadharPhoto: aadharPhotoUrl,
-                    panPhoto: panPhotoUrl,
+                    panPhoto: panPhotoUrl || null,
                     bankDetails,
                     accessExpiryDate: accessExpiryIso,
-                });
+                };
 
-
-                // Email is now sent by the Cloud Function automatically
-                Alert.alert('Success', 'Organizer account created and email sent!');
+                // console.log("Submitting payload:", JSON.stringify(payload));
+                await createOrganizer(payload);
+                Alert.alert('Success', 'Organizer account created successfully!');
             }
             router.back();
 
         } catch (error) {
-            console.error(error);
-            let userMessage = error.message || 'Failed to save organizer.';
-
-            // Handle specific Cloud Function errors
-            if (error.code === 'functions/already-exists') {
-                userMessage = "This email is already in use. Please use a different email.";
-            } else if (error.code === 'functions/permission-denied') {
-                userMessage = "Access Denied: You do not have permission to create organizers.";
-            } else if (error.message && error.message.includes('storage/unauthorized')) {
-                userMessage = "Storage Error: You do not have permission to upload files. Please check if you are logged in as an Owner.";
-            }
-
-            Alert.alert('Error', userMessage);
+            console.error("Save Organizer Error:", error);
+            // alert(`Debug: Error Catch: ${error.message}`);
+            let msg = error.message || "An unknown error occurred.";
+            if (msg.includes('already-exists')) msg = "Email already registered.";
+            if (msg.includes('permission-denied')) msg = "Permission denied. Only Owners can create accounts.";
+            Alert.alert('Registration Failed', msg);
         } finally {
             setLoading(false);
             setUploading(false);

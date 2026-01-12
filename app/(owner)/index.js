@@ -604,8 +604,14 @@ export default function OwnerDashboard() {
                 </ScrollView>
             )}
 
-            {/* Create Tournament FAB */}
-
+            {/* Create Tournament FAB - actually for Organizers in this context or general actions */}
+            <FAB
+                icon="plus"
+                style={styles.fab}
+                label="New Organizer"
+                onPress={() => router.push('/(owner)/create-organizer')}
+                visible={activeTab === 'overview'} // Only show on overview/organizer tab
+            />
         </SafeAreaView>
     );
 }

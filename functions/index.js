@@ -110,7 +110,7 @@ exports.createOrganizer = onCall({ secrets: ["GMAIL_EMAIL", "GMAIL_PASSWORD"] },
         throw new HttpsError('permission-denied', 'Only owners can create organizers.');
     }
 
-    const { email, password, name, phone, address, aadharNumber, profilePic, aadharPhoto, bankDetails, accessExpiryDate } = request.data;
+    const { email, password, name, phone, address, aadharNumber, panNumber, profilePic, aadharPhoto, panPhoto, bankDetails, accessExpiryDate } = request.data;
 
     // 2. Validate Data
     if (!email || !password || !name) {
