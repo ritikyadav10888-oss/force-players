@@ -236,15 +236,12 @@ exports.createOrganizer = onCall(async (request) => {
     }
 
     const callerUid = request.auth.uid;
-    const callerEmail = request.auth.token.email;
-    const OWNER_EMAILS = ['ritikyadav10888@gmail.com', 'priyanshu.force@gmail.com'];
 
     const callerDoc = await db.collection('users').doc(callerUid).get();
     const isLocalOwner = callerDoc.exists && callerDoc.data().role === 'owner';
-    const isEmailOwner = OWNER_EMAILS.includes(callerEmail);
     const hasOwnerClaim = request.auth.token.role === 'owner';
 
-    if (!isLocalOwner && !isEmailOwner && !hasOwnerClaim) {
+    if (!isLocalOwner && !hasOwnerClaim) {
         throw new HttpsError('permission-denied', 'Only owners can create organizers.');
     }
 

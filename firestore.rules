@@ -18,11 +18,7 @@ service cloud.firestore {
         claimRole == 'owner' || 
         claimRole == 'admin' || 
         docRole == 'owner' || 
-        docRole == 'admin' ||
-        (request.auth.token.email != null && (
-          request.auth.token.email == 'ritikyadav10888@gmail.com' ||
-          request.auth.token.email == 'priyanshu.force@gmail.com'
-        ))
+        docRole == 'admin'
       );
     }
     
@@ -77,8 +73,17 @@ service cloud.firestore {
       // Subcollection: Players (Registrations)
       match /players/{playerId} {
         // Authenticated users can register
-        // Allow both paid=false (pending) and paid=true (immediate payment)
-        allow create: if isSignedIn();
+        // SEC-V2 FIX: Prevent users from creating "paid" registrations unless free
+        allow create: if isSignedIn() && (
+          // Case 1: Standard registration (Not paid)
+          (!('paid' in request.resource.data) || request.resource.data.paid == false)
+          ||
+          // Case 2: Free Tournament Exception
+          (
+            request.resource.data.paid == true &&
+            get(/databases/$(database)/documents/tournaments/$(tournamentId)).data.entryFee == 0
+          )
+        );
         
         // Read: 
         // - Owners and assigned Organizers

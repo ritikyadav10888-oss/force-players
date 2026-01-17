@@ -871,23 +871,6 @@ export default function TournamentRegistrationScreen() {
 
                     if (!paymentId) throw new Error("Payment failed or was cancelled.");
 
-                    // Development Mode: Update status for localhost testing
-                    const isLocalhost = Platform.OS === 'web' &&
-                        (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1');
-
-                    if (isLocalhost) {
-                        console.log('🔧 Development Mode: Updating payment status for retry (localhost)');
-                        const existingDocRef = doc(db, 'tournaments', id, 'players', existingDocId);
-                        await updateDoc(existingDocRef, {
-                            paid: true,
-                            paymentId: paymentId,
-                            paidAmount: tournament.entryFee,
-                            paidAt: new Date().toISOString(),
-                            status: 'approved'
-                        });
-                        console.log('✅ Payment status updated for existing registration (localhost only)');
-                    }
-
                     // Payment successful - webhook will update the status in production
                     setPaymentStatus('success');
 
@@ -989,7 +972,7 @@ export default function TournamentRegistrationScreen() {
                 lastActive: new Date().toISOString()
             };
 
-            // 4. Create UNPAID Registration Doc
+            // 4. Create Registration Doc
             const uniqueNum = `REG-${Date.now().toString().slice(-6)}`;
             const registrationDoc = {
                 registrationNumber: uniqueNum,
@@ -1002,10 +985,10 @@ export default function TournamentRegistrationScreen() {
                 teamMembers: processedMembers.length > 0 ? processedMembers : null,
                 entryType: formData.registrationMode,
                 data: profileData,
-                paid: false, // Initially false for security
+                paid: payableAmount === 0, // Paid if free, otherwise false
                 paidAmount: payableAmount,
                 registeredAt: new Date().toISOString(),
-                status: 'pending'
+                status: payableAmount === 0 ? 'approved' : 'pending'
             };
 
             const docRef = await addDoc(collection(db, 'tournaments', id, 'players'), registrationDoc);
@@ -1183,28 +1166,11 @@ export default function TournamentRegistrationScreen() {
 
                 if (!paymentId) throw new Error("Payment failed or was cancelled.");
 
-                // 6. Development Mode: Update status client-side for localhost testing
-                // In production, the webhook will handle this securely
-                const isLocalhost = Platform.OS === 'web' &&
-                    (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1');
-
-                if (isLocalhost) {
-                    console.log('🔧 Development Mode: Updating payment status client-side for testing');
-                    await updateDoc(docRef, {
-                        paid: true,
-                        paymentId: paymentId,
-                        paidAmount: payableAmount,
-                        paidAt: new Date().toISOString(),
-                        status: 'approved'
-                    });
-                    console.log('✅ Payment status updated (localhost only)');
-                } else {
-                    // Production: Webhook will update the status
-                    console.log('🔒 Production Mode: Webhook will update payment status');
-                }
+                // Production: Webhook will update the status
+                console.log('🔒 Production Mode: Webhook will update payment status');
             } else {
-                // Free Entry - Update to paid directly (if rule allows, or consider moving to a function)
-                await updateDoc(docRef, { paid: true, status: 'approved' });
+                // Free Entry - Already marked as paid in registrationDoc
+                console.log("Free entry registration confirmed.");
             }
 
             // 7. Update Master Records and Finalize
@@ -1436,23 +1402,6 @@ export default function TournamentRegistrationScreen() {
                                             });
 
                                             if (!paymentId) throw new Error("Payment cancelled");
-
-                                            // Development Mode: Update status for localhost testing
-                                            const isLocalhost = Platform.OS === 'web' &&
-                                                (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1');
-
-                                            if (isLocalhost) {
-                                                console.log('🔧 Development Mode: Updating payment status from banner (localhost)');
-                                                const existingDocRef = doc(db, 'tournaments', id, 'players', existingRegistration.docId);
-                                                await updateDoc(existingDocRef, {
-                                                    paid: true,
-                                                    paymentId: paymentId,
-                                                    paidAmount: tournament.entryFee,
-                                                    paidAt: new Date().toISOString(),
-                                                    status: 'approved'
-                                                });
-                                                console.log('✅ Payment status updated from banner (localhost only)');
-                                            }
 
                                             setPaymentStatus('success');
                                             setRegistrationId(existingRegistration.registrationNumber);

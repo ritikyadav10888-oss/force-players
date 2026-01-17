@@ -5,12 +5,9 @@ service firebase.storage {
     // Helper: Check if user is an Owner
     function isOwner() {
       let claimRole = request.auth.token.get('role', 'guest').lower();
-      let email = request.auth.token.email;
       return request.auth != null && (
         claimRole == 'owner' || 
-        claimRole == 'admin' ||
-        email == 'ritikyadav10888@gmail.com' ||
-        email == 'priyanshu.force@gmail.com'
+        claimRole == 'admin'
       );
     }
 
@@ -45,7 +42,7 @@ service firebase.storage {
 
     match /tournaments/{allPaths=**} {
       allow read: if true;
-      allow write: if request.auth != null;
+      allow write: if isOwner() || isOrganizer();
     }
 
     // 4. Organizer Documents (Profile, Aadhar, PAN)
