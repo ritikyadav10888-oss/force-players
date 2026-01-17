@@ -27,6 +27,10 @@
     ],
     "rewrites": [
       {
+        "source": "/reset-password.html",
+        "destination": "/reset-password.html"
+      },
+      {
         "source": "**",
         "destination": "/index.html"
       }
@@ -42,5 +46,8 @@
         ]
       }
     ]
+  },
+  "extensions": {
+    "firestore-send-email": "firebase/firestore-send-email@0.2.4"
   }
 }

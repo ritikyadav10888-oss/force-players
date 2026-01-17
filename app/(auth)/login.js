@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { View, StyleSheet, TouchableOpacity, Alert, KeyboardAvoidingView, Platform, Image, ScrollView } from 'react-native';
-import { TextInput, Button, Text, Title, Surface, useTheme, Banner } from 'react-native-paper';
+import { TextInput, Button, Text, Title, Surface, useTheme, Banner, Snackbar } from 'react-native-paper';
 import { useRouter } from 'expo-router';
 import { useAuth } from '../../src/context/AuthContext';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -14,6 +14,12 @@ export default function LoginScreen() {
     const [showPassword, setShowPassword] = useState(false);
     const [isLoginLoading, setIsLoginLoading] = useState(false);
     const [isOffline, setIsOffline] = useState(false);
+
+    // Snackbar State
+    const [snackbarVisible, setSnackbarVisible] = useState(false);
+    const [snackbarMessage, setSnackbarMessage] = useState('');
+    const [snackbarType, setSnackbarType] = useState('error'); // 'error' or 'success'
+
     const { login, resetPassword } = useAuth();
     const router = useRouter();
     const theme = useTheme();
@@ -65,24 +71,16 @@ export default function LoginScreen() {
                 errorMessage = error.message;
             }
 
-            Alert.alert('Login Failed', errorMessage);
+            setSnackbarMessage(errorMessage);
+            setSnackbarType('error');
+            setSnackbarVisible(true);
         } finally {
             setIsLoginLoading(false);
         }
     };
 
-    const handleForgotPassword = async () => {
-        if (!email) {
-            Alert.alert('Requirement', 'Please enter your email address in the field above to reset your password.');
-            return;
-        }
-        try {
-            await resetPassword(email);
-            Alert.alert('Success', 'Password reset email sent! Check your inbox.');
-        } catch (error) {
-            console.error(error);
-            Alert.alert('Error', 'Failed to send reset email. ' + error.message);
-        }
+    const handleForgotPassword = () => {
+        router.push('/(auth)/forgot-password');
     };
 
     return (
@@ -126,7 +124,7 @@ export default function LoginScreen() {
                             <Text style={styles.appSubtitle}>Tournament Management System</Text>
                         </View>
 
-                        <Surface style={styles.card} elevation={4}>
+                        <Surface style={styles.card} elevation={10}>
                             <Title style={styles.loginTitle}>Welcome Back</Title>
 
                             <TextInput
@@ -141,6 +139,7 @@ export default function LoginScreen() {
                                 outlineColor="#E0E0E0"
                                 activeOutlineColor={theme.colors.primary}
                                 textColor="#333"
+                                accessibilityLabel="Email Address"
                             />
 
                             <TextInput
@@ -154,6 +153,7 @@ export default function LoginScreen() {
                                         icon={showPassword ? "eye-off" : "eye"}
                                         color="gray"
                                         onPress={() => setShowPassword(!showPassword)}
+                                        accessibilityLabel={showPassword ? "Hide password" : "Show password"}
                                     />
                                 }
                                 secureTextEntry={!showPassword}
@@ -161,6 +161,7 @@ export default function LoginScreen() {
                                 outlineColor="#E0E0E0"
                                 activeOutlineColor={theme.colors.primary}
                                 textColor="#333"
+                                accessibilityLabel="Password"
                             />
 
                             <Button
@@ -168,7 +169,10 @@ export default function LoginScreen() {
                                 onPress={handleLogin}
                                 loading={isLoginLoading}
                                 style={styles.button}
-                                contentStyle={{ height: 50 }}
+                                contentStyle={{ height: 56 }}
+                                labelStyle={{ fontSize: 18, fontWeight: 'bold' }}
+                                accessibilityLabel="Login"
+                                icon="login"
                             >
                                 Login
                             </Button>
@@ -176,18 +180,65 @@ export default function LoginScreen() {
                             <Button
                                 mode="text"
                                 onPress={handleForgotPassword}
-                                style={{ marginTop: 10 }}
+                                style={{ marginTop: 20 }}
+                                disabled={isLoginLoading}
+                                icon="lock-question"
+                                labelStyle={{ fontSize: 15, fontWeight: '600' }}
+                                accessibilityRole="button"
+                                accessibilityLabel="Forgot Password"
                             >
                                 Forgot Password?
                             </Button>
                         </Surface>
 
-                        <View style={styles.footer}>
-                            <Text style={{ color: 'rgba(255,255,255,0.7)' }}>v1.0.0 - Secure System</Text>
+                        <View style={styles.footer} accessibilityRole="navigation" accessibilityLabel="Legal Links">
+                            <View style={styles.policyLinks}>
+                                <TouchableOpacity
+                                    onPress={() => router.push('/policies/terms')}
+                                    accessibilityRole="link"
+                                    accessibilityLabel="Terms of Service"
+                                >
+                                    <Text style={styles.policyText}>Terms</Text>
+                                </TouchableOpacity>
+                                <Text style={styles.divider} importantForAccessibility="no-hide-descendants">•</Text>
+                                <TouchableOpacity
+                                    onPress={() => router.push('/policies/privacy')}
+                                    accessibilityRole="link"
+                                    accessibilityLabel="Privacy Policy"
+                                >
+                                    <Text style={styles.policyText}>Privacy</Text>
+                                </TouchableOpacity>
+                                <Text style={styles.divider} importantForAccessibility="no-hide-descendants">•</Text>
+                                <TouchableOpacity
+                                    onPress={() => router.push('/policies/refund')}
+                                    accessibilityRole="link"
+                                    accessibilityLabel="Refund Policy"
+                                >
+                                    <Text style={styles.policyText}>Refund</Text>
+                                </TouchableOpacity>
+                                <Text style={styles.divider} importantForAccessibility="no-hide-descendants">•</Text>
+                                <TouchableOpacity
+                                    onPress={() => router.push('/policies/contact')}
+                                    accessibilityRole="link"
+                                    accessibilityLabel="Contact Support"
+                                >
+                                    <Text style={styles.policyText}>Contact</Text>
+                                </TouchableOpacity>
+                            </View>
+                            <Text style={{ color: 'rgba(255,255,255,0.7)', marginTop: 10 }}>v1.0.0 - Secure System</Text>
                         </View>
                     </ScrollView>
                 </KeyboardAvoidingView>
             </SafeAreaView>
+            {/* Snackbar for Notifications */}
+            <Snackbar
+                visible={snackbarVisible}
+                onDismiss={() => setSnackbarVisible(false)}
+                duration={4000}
+                style={{ backgroundColor: snackbarType === 'error' ? '#D32F2F' : '#388E3C' }}
+            >
+                {snackbarMessage}
+            </Snackbar>
         </View>
     );
 }
@@ -249,7 +300,7 @@ const styles = StyleSheet.create({
     },
     card: {
         backgroundColor: 'rgba(255, 255, 255, 0.95)',
-        borderRadius: 24,
+        borderRadius: 28,
         paddingHorizontal: 30,
         paddingVertical: 40,
         width: '100%',
@@ -262,7 +313,7 @@ const styles = StyleSheet.create({
         },
         shadowOpacity: 0.30,
         shadowRadius: 4.65,
-        elevation: 8,
+        elevation: 10,
     },
     loginTitle: {
         textAlign: 'center',
@@ -277,8 +328,9 @@ const styles = StyleSheet.create({
     },
     button: {
         marginTop: 15,
-        borderRadius: 12,
-        backgroundColor: '#1a237e'
+        borderRadius: 16,
+        backgroundColor: '#1a237e',
+        elevation: 4
     },
     footer: {
         marginTop: 30,
@@ -295,5 +347,19 @@ const styles = StyleSheet.create({
         color: 'white',
         fontWeight: 'bold',
         fontSize: 14,
+    },
+    policyLinks: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        justifyContent: 'center',
+    },
+    policyText: {
+        color: 'rgba(255,255,255,0.9)',
+        fontSize: 14,
+        fontWeight: '500',
+    },
+    divider: {
+        color: 'rgba(255,255,255,0.5)',
+        marginHorizontal: 8,
     }
 });

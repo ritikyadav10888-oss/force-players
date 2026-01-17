@@ -1,11 +1,11 @@
 import React, { useState, useEffect } from 'react';
 import { View, StyleSheet, ScrollView, Alert, Platform, KeyboardAvoidingView, TouchableOpacity, Image } from 'react-native';
-import { TextInput, Button, Title, Text, Menu, Divider, useTheme, Surface, RadioButton, Searchbar, Portal, Modal, TouchableRipple, Avatar, SegmentedButtons, List, Snackbar } from 'react-native-paper';
+import { TextInput, Button, Title, Text, Menu, Divider, useTheme, Surface, RadioButton, Searchbar, Portal, Modal, TouchableRipple, Avatar, SegmentedButtons, List } from 'react-native-paper';
 import { useRouter, useLocalSearchParams } from 'expo-router';
-import { collection, addDoc, getDocs, query, where, doc, getDoc, updateDoc } from 'firebase/firestore';
+import { collection, addDoc, getDocs, query, where, doc, getDoc, updateDoc, deleteDoc } from 'firebase/firestore';
 import { ref, uploadBytes, getDownloadURL, uploadString } from 'firebase/storage';
-import { db, storage } from '../../src/config/firebase';
-import { useAuth } from '../../src/context/AuthContext';
+import { db, storage } from '../../../src/config/firebase';
+import { useAuth } from '../../../src/context/AuthContext';
 import DateTimePicker from '@react-native-community/datetimepicker';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
@@ -175,7 +175,7 @@ const GAME_ENTRY_CONFIG = {
     "Snooker": ["Solo"],
 };
 
-export default function CreateTournamentScreen() {
+export default function TournamentDetailsScreen() {
     const router = useRouter();
     const params = useLocalSearchParams();
     const theme = useTheme();
@@ -298,12 +298,6 @@ export default function CreateTournamentScreen() {
     };
 
     const [loading, setLoading] = useState(false);
-
-    // Snackbar for validation errors
-    const [snackbarVisible, setSnackbarVisible] = useState(false);
-    const [snackbarMessage, setSnackbarMessage] = useState('');
-    const [fieldErrors, setFieldErrors] = useState({});
-
 
     useEffect(() => {
         fetchOrganizers();
@@ -477,114 +471,11 @@ export default function CreateTournamentScreen() {
     };
 
 
-
-    // Comprehensive Form Validation
-    const validateForm = () => {
-        const errors = {};
-        const finalGameName = gameName === 'Other' ? customGameName : gameName;
-
-        // Tournament Name
-        if (!name || name.trim().length < 3) {
-            errors.name = 'Tournament Name must be at least 3 characters long';
-        }
-
-        // Game Name
-        if (!finalGameName || finalGameName.trim().length < 3) {
-            errors.gameName = 'Please select a game or provide a custom game name (min 3 characters)';
-        }
-
-        // Entry Fee
-        if (!entryFee || isNaN(Number(entryFee)) || Number(entryFee) < 0) {
-            errors.entryFee = 'Entry Fee must be a valid positive number';
-        }
-
-        // Description
-        if (!description || description.trim().length < 10) {
-            errors.description = 'Description must be at least 10 characters long';
-        }
-
-        // Address
-        if (!address || address.trim().length < 5) {
-            errors.address = 'Venue/Address must be at least 5 characters long';
-        }
-
-        // Rules
-        if (!rules || rules.trim().length < 10) {
-            errors.rules = 'Rules must be at least 10 characters long';
-        }
-
-        // Terms & Conditions
-        if (!termsAndConditions || termsAndConditions.trim().length < 10) {
-            errors.termsAndConditions = 'Terms & Conditions must be at least 10 characters long';
-        }
-
-        // Prize Pool (optional but if provided, must be valid)
-        if (winningPrize && (isNaN(Number(winningPrize)) || Number(winningPrize) < 0)) {
-            errors.winningPrize = 'Prize Pool must be a valid positive number';
-        }
-
-        // Max Participants/Teams
-        if (tournamentType === 'Team') {
-            if (!maxTeams || isNaN(Number(maxTeams)) || Number(maxTeams) <= 0) {
-                errors.maxTeams = 'Max Number of Teams must be a positive number';
-            }
-        } else {
-            if (!maxParticipants || isNaN(Number(maxParticipants)) || Number(maxParticipants) <= 0) {
-                errors.maxParticipants = 'Max Participants must be a positive number';
-            }
-        }
-
-        // Team Size (required if entry type is Team)
-        if (entryType === 'Team') {
-            if (!teamSize || isNaN(Number(teamSize)) || Number(teamSize) <= 0) {
-                errors.teamSize = 'Players per Team must be a positive number';
-            }
-        }
-
-        // Organizer
-        if (!selectedOrganizer) {
-            errors.organizer = 'Please select an organizer for this tournament';
-        }
-
-        // Date Validations
-        const regDateTime = new Date(regDate);
-        const startDateTime = new Date(startDate);
-        const endDateTime = new Date(endDate);
-        const accessExpiryDateTime = new Date(accessExpiryDate);
-
-        // Registration deadline should be before or equal to start date
-        if (regDateTime > startDateTime) {
-            errors.dates = 'Registration Deadline must be before or equal to Start Date';
-        }
-
-        // Start date should be before or equal to end date
-        if (startDateTime > endDateTime) {
-            errors.dates = 'Start Date must be before or equal to End Date';
-        }
-
-        // Access expiry should be after end date
-        if (accessExpiryDateTime < endDateTime) {
-            errors.accessExpiry = 'Organizer Access Expiry Date must be after the Tournament End Date';
-        }
-
-        setFieldErrors(errors);
-
-        // Return first error message if any
-        if (Object.keys(errors).length > 0) {
-            const firstError = Object.values(errors)[0];
-            return { isValid: false, errorMessage: firstError };
-        }
-
-        return { isValid: true };
-    };
-
     const handleCreate = async () => {
         const finalGameName = gameName === 'Other' ? customGameName : gameName;
 
-        const validationResult = validateForm();
-        if (!validationResult.isValid) {
-            setSnackbarMessage(validationResult.errorMessage);
-            setSnackbarVisible(true);
+        if (!name || !finalGameName || !entryFee || !selectedOrganizer) {
+            Alert.alert('Error', 'Please fill all required fields (Name, Game, Entry Fee, Organizer).');
             return;
         }
 
@@ -644,10 +535,12 @@ export default function CreateTournamentScreen() {
             if (params.id) {
                 // Update
                 const docRef = doc(db, 'tournaments', params.id);
-                delete payload.createdBy;
-                delete payload.createdAt;
-                delete payload.status;
-                await updateDoc(docRef, payload);
+                const updatePayload = { ...payload };
+                delete updatePayload.createdBy; // Never update creator
+                delete updatePayload.createdAt; // Never update creation time
+                delete updatePayload.status;    // Status managed elsewhere
+
+                await updateDoc(docRef, updatePayload);
                 Alert.alert('Success', 'Tournament Updated!');
             } else {
                 // Create
@@ -665,13 +558,17 @@ export default function CreateTournamentScreen() {
         }
     };
 
+    const isEditMode = !!params.id;
+
     return (
         <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={{ flex: 1 }}>
             <ScrollView style={[styles.container, { backgroundColor: '#F5F7FA' }]} contentContainerStyle={styles.contentContainer}>
 
-                <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 20 }}>
-                    <Button icon="arrow-left" mode="text" onPress={() => router.back()} compact style={{ marginRight: 10 }}>Back</Button>
-                    <Title style={styles.title}>{params.id ? 'Edit Tournament' : 'Create Tournament'}</Title>
+                <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 20, justifyContent: 'space-between' }}>
+                    <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                        <Button icon="arrow-left" mode="text" onPress={() => router.back()} compact style={{ marginRight: 10 }}>Back</Button>
+                        <Title style={styles.title}>{isEditMode ? 'Tournament Details' : 'Create Tournament'}</Title>
+                    </View>
                 </View>
 
                 {/* 0. Banner Image */}
@@ -702,7 +599,6 @@ export default function CreateTournamentScreen() {
                         onChangeText={setName}
                         mode="outlined"
                         style={styles.input}
-                        error={!!fieldErrors.name}
                         left={<TextInput.Icon icon={() => <MaterialCommunityIcons name="format-title" size={20} color="gray" />} />}
                     />
 
@@ -786,7 +682,6 @@ export default function CreateTournamentScreen() {
                             onChangeText={setCustomGameName}
                             mode="outlined"
                             style={styles.input}
-                            error={!!fieldErrors.gameName}
                         />
                     )}
 
@@ -831,7 +726,6 @@ export default function CreateTournamentScreen() {
                             value={teamSize}
                             onChangeText={setTeamSize}
                             keyboardType="numeric"
-                            error={!!fieldErrors.teamSize}
                             left={<TextInput.Icon icon={() => <MaterialCommunityIcons name="account-group" size={20} color="gray" />} />}
                         />
                     )}
@@ -846,7 +740,6 @@ export default function CreateTournamentScreen() {
                             mode="outlined"
                             style={[styles.input, { marginBottom: 15 }]}
                             placeholder="e.g. 10"
-                            error={!!fieldErrors.maxTeams}
                             left={<TextInput.Icon icon={() => <MaterialCommunityIcons name="numeric" size={20} color="gray" />} />}
                         />
                     )}
@@ -862,7 +755,6 @@ export default function CreateTournamentScreen() {
                             mode="outlined"
                             style={[styles.input, { marginBottom: 15 }]}
                             placeholder={entryType === 'Team' ? "Ex: 16 Teams" : (entryType === 'Duo' ? "Ex: 32 Pairs" : "Ex: 64 Players")}
-                            error={!!fieldErrors.maxParticipants}
                             left={<TextInput.Icon icon={() => <MaterialCommunityIcons name="account-group" size={20} color="gray" />} />}
                         />
                     )}
@@ -906,7 +798,6 @@ export default function CreateTournamentScreen() {
                         multiline
                         numberOfLines={3}
                         style={styles.input}
-                        error={!!fieldErrors.description}
                         left={<TextInput.Icon icon={() => <MaterialCommunityIcons name="file-document-edit" size={20} color="gray" />} />}
                     />
 
@@ -918,7 +809,6 @@ export default function CreateTournamentScreen() {
                         multiline
                         numberOfLines={4}
                         style={styles.input}
-                        error={!!fieldErrors.address}
                         left={<TextInput.Icon icon={() => <MaterialCommunityIcons name="map-marker" size={20} color="gray" />} />}
                     />
 
@@ -930,7 +820,6 @@ export default function CreateTournamentScreen() {
                         multiline
                         numberOfLines={3}
                         style={styles.input}
-                        error={!!fieldErrors.rules}
                         left={<TextInput.Icon icon={() => <MaterialCommunityIcons name="gavel" size={20} color="gray" />} />}
                     />
 
@@ -942,7 +831,6 @@ export default function CreateTournamentScreen() {
                         multiline
                         numberOfLines={5}
                         style={styles.input}
-                        error={!!fieldErrors.termsAndConditions}
                         placeholder="Specify rules regarding refunds, behavior, equipment, etc."
                         left={<TextInput.Icon icon={() => <MaterialCommunityIcons name="file-document-check" size={20} color="gray" />} />}
                     />
@@ -962,7 +850,6 @@ export default function CreateTournamentScreen() {
                             keyboardType="numeric"
                             mode="outlined"
                             style={[styles.input, { flex: 1, marginRight: 8 }]}
-                            error={!!fieldErrors.entryFee}
                             left={<TextInput.Icon icon={() => <MaterialCommunityIcons name="cash" size={20} color="gray" />} />}
                         />
                         <TextInput
@@ -971,7 +858,6 @@ export default function CreateTournamentScreen() {
                             onChangeText={setWinningPrize}
                             mode="outlined"
                             style={[styles.input, { flex: 1, marginLeft: 8 }]}
-                            error={!!fieldErrors.winningPrize}
                             left={<TextInput.Icon icon={() => <MaterialCommunityIcons name="trophy-award" size={20} color="gray" />} />}
                         />
                     </View>
@@ -1283,21 +1169,6 @@ export default function CreateTournamentScreen() {
                     {params.id ? 'Update Tournament' : 'Create & Assign'}
                 </Button>
             </ScrollView>
-
-            {/* Snackbar for Validation Errors */}
-            <Snackbar
-                visible={snackbarVisible}
-                onDismiss={() => setSnackbarVisible(false)}
-                duration={4000}
-                style={{ backgroundColor: '#D32F2F' }}
-                action={{
-                    label: 'OK',
-                    onPress: () => setSnackbarVisible(false),
-                    labelStyle: { color: '#FFFFFF' }
-                }}
-            >
-                <Text style={{ color: '#FFFFFF', fontSize: 14 }}>{snackbarMessage}</Text>
-            </Snackbar>
         </KeyboardAvoidingView>
     );
 }

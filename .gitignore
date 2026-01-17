@@ -40,6 +40,14 @@ yarn-error.*
 /ios
 /android
 
+# Android build outputs
+*.apk
+*.aab
+android/app/build/
+android/build/
+android/.gradle/
+android/app/release.keystore
+
 # Security
 scripts/serviceAccountKey.json
 

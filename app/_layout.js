@@ -22,6 +22,20 @@ if (Platform.OS === 'web') {
         }
         originalWarn(...args);
     };
+
+    const originalError = console.error;
+    console.error = (...args) => {
+        if (args[0] && typeof args[0] === 'string' && (
+            args[0].includes('Cannot record touch end without a touch start') ||
+            args[0].includes('Touch Bank:') ||
+            args[0].includes('Touch End:') ||
+            args[0].includes('Refused to get unsafe header')
+        )) {
+            return;
+        }
+        originalError(...args);
+    };
+
     // Suppress unhandled rejections from Firebase when offline/proxy blocked
     if (typeof window !== 'undefined') {
         window.addEventListener('unhandledrejection', (event) => {

@@ -37,6 +37,7 @@ export default function CreateOrganizerScreen() {
     const [uploading, setUploading] = useState(false);
 
     const [bankDetails, setBankDetails] = useState({ accountNumber: '', ifsc: '', bankName: '' });
+    const [errors, setErrors] = useState({});
     const [loading, setLoading] = useState(false);
     const [showPassword, setShowPassword] = useState(false);
 
@@ -131,6 +132,35 @@ export default function CreateOrganizerScreen() {
     // The previous client-side implementation was insecure and has been removed.
 
 
+    const validate = () => {
+        let newErrors = {};
+        if (!name?.trim()) newErrors.name = "Name is required";
+        if (!phone?.trim()) newErrors.phone = "Phone is required";
+        if (phone && (phone.length < 10 || phone.length > 12)) newErrors.phone = "Invalid phone number (10-12 digits)";
+        if (!address?.trim()) newErrors.address = "Address is required";
+        if (!aadharNumber?.trim()) newErrors.aadharNumber = "Aadhar number is required";
+        if (aadharNumber && !/^[0-9]{12}$/.test(aadharNumber.replace(/\s/g, ''))) newErrors.aadharNumber = "Must be 12 digits";
+
+        if (!bankDetails.accountNumber?.trim()) newErrors.accountNumber = "Account number is required";
+        if (!bankDetails.ifsc?.trim()) newErrors.ifsc = "IFSC code is required";
+        if (!bankDetails.bankName?.trim()) newErrors.bankName = "Bank name is required";
+
+        if (!profileImage) newErrors.profileImage = "Profile photo is required";
+        if (!aadharImage) newErrors.aadharImage = "Aadhar card photo is required";
+
+        if (!panNumber?.trim()) newErrors.panNumber = "PAN number is required";
+        if (!panImage) newErrors.panImage = "PAN card photo is required";
+
+        if (!editId) {
+            if (!email?.trim()) newErrors.email = "Email is required";
+            if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) newErrors.email = "Invalid email format";
+            if (!password || password.length < 6) newErrors.password = "Password must be at least 6 characters";
+        }
+
+        setErrors(newErrors);
+        return Object.keys(newErrors).length === 0;
+    };
+
     const handleSave = async () => {
         // 0. Check Authentication
         if (!user) {
@@ -138,32 +168,9 @@ export default function CreateOrganizerScreen() {
             return;
         }
 
-        // 1. Basic Required Fields
-        if (!name?.trim()) { Alert.alert('Error', 'Please enter organizer name'); return; }
-        if (!phone?.trim()) { Alert.alert('Error', 'Please enter phone number'); return; }
-        if (!address?.trim()) { Alert.alert('Error', 'Please enter full address'); return; }
-        if (!aadharNumber?.trim()) { Alert.alert('Error', 'Please enter Aadhar number'); return; }
-
-        // Bank Details
-        if (!bankDetails.accountNumber?.trim()) { Alert.alert('Error', 'Please enter bank account number'); return; }
-        if (!bankDetails.ifsc?.trim()) { Alert.alert('Error', 'Please enter IFSC code'); return; }
-        if (!bankDetails.bankName?.trim()) { Alert.alert('Error', 'Please enter bank name'); return; }
-
-        // Photos
-        if (!profileImage) { Alert.alert('Error', 'Please upload a profile photo'); return; }
-        if (!aadharImage) { Alert.alert('Error', 'Please upload an Aadhar card photo'); return; }
-
-        // Regex Validations
-        const cleanPhone = phone.replace(/[^0-9]/g, '');
-        if (cleanPhone.length < 10 || cleanPhone.length > 12) { alert(`Error: Invalid phone number length (${cleanPhone.length}). Must be 10-12 digits.`); return; }
-
-        const cleanAadhar = aadharNumber.replace(/\s/g, '');
-        if (!/^[0-9]{12}$/.test(cleanAadhar)) { Alert.alert('Error', 'Invalid 12-digit Aadhar number'); return; }
-
-        if (!editId) {
-            if (!email?.trim()) { Alert.alert('Error', 'Email is required'); return; }
-            if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { Alert.alert('Error', 'Invalid email address'); return; }
-            if (!password || password.length < 6) { Alert.alert('Error', 'Password must be at least 6 characters'); return; }
+        if (!validate()) {
+            Alert.alert("Validation Error", "Please fill in all required fields marked in red.");
+            return;
         }
 
         setLoading(true);
@@ -254,13 +261,13 @@ export default function CreateOrganizerScreen() {
 
                 {/* 1. Profile Picture Section */}
                 <View style={styles.profileSection}>
-                    <TouchableOpacity onPress={() => pickImage(setProfileImage)} style={styles.profileUpload}>
+                    <TouchableOpacity onPress={() => pickImage(setProfileImage)} style={[styles.profileUpload, errors.profileImage && { borderColor: 'red', borderWidth: 2 }]}>
                         {profileImage ? (
                             <Image source={{ uri: profileImage }} style={styles.profilePreview} />
                         ) : (
                             <View style={styles.profilePlaceholder}>
-                                <MaterialCommunityIcons name="camera-plus" size={30} color={theme.colors.primary} />
-                                <Text style={styles.profileText}>Add Photo</Text>
+                                <MaterialCommunityIcons name="camera-plus" size={30} color={errors.profileImage ? "red" : theme.colors.primary} />
+                                <Text style={[styles.profileText, errors.profileImage && { color: 'red' }]}>Add Photo</Text>
                             </View>
                         )}
                         {/* Edit Icon Overlay */}
@@ -268,6 +275,7 @@ export default function CreateOrganizerScreen() {
                             <MaterialCommunityIcons name="pencil" size={14} color="white" />
                         </View>
                     </TouchableOpacity>
+                    {errors.profileImage && <HelperText type="error" visible={true}>{errors.profileImage}</HelperText>}
                 </View>
 
                 {/* 2. Personal Information Card */}
@@ -282,9 +290,11 @@ export default function CreateOrganizerScreen() {
                         value={name}
                         onChangeText={setName}
                         mode="outlined"
+                        error={!!errors.name}
                         style={styles.input}
                         left={<TextInput.Icon icon={() => <MaterialCommunityIcons name="account" size={20} color="gray" />} />}
                     />
+                    <HelperText type="error" visible={!!errors.name}>{errors.name}</HelperText>
                     <TextInput
                         label="Email Address"
                         value={email}
@@ -293,36 +303,44 @@ export default function CreateOrganizerScreen() {
                         keyboardType="email-address"
                         autoCapitalize="none"
                         mode="outlined"
+                        error={!!errors.email}
                         style={styles.input}
                         left={<TextInput.Icon icon={() => <MaterialCommunityIcons name="email" size={20} color="gray" />} />}
                     />
+                    <HelperText type="error" visible={!!errors.email}>{errors.email}</HelperText>
                     <TextInput
                         label="Phone Number"
                         value={phone}
                         onChangeText={setPhone}
                         keyboardType="phone-pad"
                         mode="outlined"
+                        error={!!errors.phone}
                         style={styles.input}
                         left={<TextInput.Icon icon={() => <MaterialCommunityIcons name="phone" size={20} color="gray" />} />}
                     />
+                    <HelperText type="error" visible={!!errors.phone}>{errors.phone}</HelperText>
                     <TextInput
                         label="Full Address"
                         value={address}
                         onChangeText={setAddress}
                         mode="outlined"
+                        error={!!errors.address}
                         style={styles.input}
                         multiline
                         left={<TextInput.Icon icon={() => <MaterialCommunityIcons name="map-marker" size={20} color="gray" />} />}
                     />
+                    <HelperText type="error" visible={!!errors.address}>{errors.address}</HelperText>
                     <TextInput
                         label="Aadhar Number"
                         value={aadharNumber}
                         onChangeText={setAadharNumber}
                         keyboardType="numeric"
                         mode="outlined"
+                        error={!!errors.aadharNumber}
                         style={styles.input}
                         left={<TextInput.Icon icon={() => <MaterialCommunityIcons name="card-account-details" size={20} color="gray" />} />}
                     />
+                    <HelperText type="error" visible={!!errors.aadharNumber}>{errors.aadharNumber}</HelperText>
                     <TextInput
                         label="PAN Card Number"
                         value={panNumber}
@@ -330,13 +348,15 @@ export default function CreateOrganizerScreen() {
                         autoCapitalize="characters"
                         maxLength={10}
                         mode="outlined"
+                        error={!!errors.panNumber}
                         style={styles.input}
                         left={<TextInput.Icon icon={() => <MaterialCommunityIcons name="credit-card-outline" size={20} color="gray" />} />}
                         placeholder="ABCDE1234F"
                     />
+                    <HelperText type="error" visible={!!errors.panNumber}>{errors.panNumber}</HelperText>
 
-                    <Text style={styles.subLabel}>Aadhar Card Photo</Text>
-                    <TouchableOpacity onPress={() => pickImage(setAadharImage)} style={styles.documentUpload}>
+                    <Text style={[styles.subLabel, errors.aadharImage && { color: 'red' }]}>Aadhar Card Photo</Text>
+                    <TouchableOpacity onPress={() => pickImage(setAadharImage)} style={[styles.documentUpload, errors.aadharImage && { borderColor: 'red' }]}>
                         {aadharImage ? (
                             <>
                                 <Image source={{ uri: aadharImage }} style={styles.documentPreview} />
@@ -346,14 +366,15 @@ export default function CreateOrganizerScreen() {
                             </>
                         ) : (
                             <View style={styles.documentPlaceholder}>
-                                <MaterialCommunityIcons name="file-document-outline" size={32} color="gray" />
-                                <Text style={{ color: 'gray', marginTop: 5 }}>Tap to Upload Aadhar</Text>
+                                <MaterialCommunityIcons name="file-document-outline" size={32} color={errors.aadharImage ? "red" : "gray"} />
+                                <Text style={{ color: errors.aadharImage ? "red" : 'gray', marginTop: 5 }}>Tap to Upload Aadhar</Text>
                             </View>
                         )}
                     </TouchableOpacity>
+                    {errors.aadharImage && <HelperText type="error" visible={true}>{errors.aadharImage}</HelperText>}
 
-                    <Text style={styles.subLabel}>PAN Card Photo</Text>
-                    <TouchableOpacity onPress={() => pickImage(setPanImage)} style={styles.documentUpload}>
+                    <Text style={[styles.subLabel, errors.panImage && { color: 'red' }]}>PAN Card Photo</Text>
+                    <TouchableOpacity onPress={() => pickImage(setPanImage)} style={[styles.documentUpload, errors.panImage && { borderColor: 'red' }]}>
                         {panImage ? (
                             <>
                                 <Image source={{ uri: panImage }} style={styles.documentPreview} />
@@ -363,11 +384,12 @@ export default function CreateOrganizerScreen() {
                             </>
                         ) : (
                             <View style={styles.documentPlaceholder}>
-                                <MaterialCommunityIcons name="credit-card-outline" size={32} color="gray" />
-                                <Text style={{ color: 'gray', marginTop: 5 }}>Tap to Upload PAN Card</Text>
+                                <MaterialCommunityIcons name="credit-card-outline" size={32} color={errors.panImage ? "red" : "gray"} />
+                                <Text style={{ color: errors.panImage ? "red" : 'gray', marginTop: 5 }}>Tap to Upload PAN Card</Text>
                             </View>
                         )}
                     </TouchableOpacity>
+                    {errors.panImage && <HelperText type="error" visible={true}>{errors.panImage}</HelperText>}
                 </Surface>
 
                 {/* 3. Bank Details Card */}
@@ -382,26 +404,34 @@ export default function CreateOrganizerScreen() {
                         onChangeText={(text) => setBankDetails({ ...bankDetails, accountNumber: text })}
                         keyboardType="numeric"
                         mode="outlined"
+                        error={!!errors.accountNumber}
                         style={styles.input}
                         left={<TextInput.Icon icon={() => <MaterialCommunityIcons name="numeric" size={20} color="gray" />} />}
                     />
+                    <HelperText type="error" visible={!!errors.accountNumber}>{errors.accountNumber}</HelperText>
+
                     <TextInput
                         label="IFSC Code"
                         value={bankDetails.ifsc}
                         onChangeText={(text) => setBankDetails({ ...bankDetails, ifsc: text })}
                         autoCapitalize="characters"
                         mode="outlined"
+                        error={!!errors.ifsc}
                         style={styles.input}
                         left={<TextInput.Icon icon={() => <MaterialCommunityIcons name="barcode" size={20} color="gray" />} />}
                     />
+                    <HelperText type="error" visible={!!errors.ifsc}>{errors.ifsc}</HelperText>
+
                     <TextInput
                         label="Bank Name"
                         value={bankDetails.bankName}
                         onChangeText={(text) => setBankDetails({ ...bankDetails, bankName: text })}
                         mode="outlined"
+                        error={!!errors.bankName}
                         style={styles.input}
                         left={<TextInput.Icon icon={() => <MaterialCommunityIcons name="bank-outline" size={20} color="gray" />} />}
                     />
+                    <HelperText type="error" visible={!!errors.bankName}>{errors.bankName}</HelperText>
                 </Surface>
 
                 {/* 4. Access Duration Card */}
@@ -478,10 +508,9 @@ export default function CreateOrganizerScreen() {
                             label="Set Password"
                             value={password}
                             onChangeText={setPassword}
-
                             secureTextEntry={!showPassword}
-
                             mode="outlined"
+                            error={!!errors.password}
                             style={styles.input}
                             left={<TextInput.Icon icon={() => <MaterialCommunityIcons name="lock" size={20} color="gray" />} />}
                             right={
@@ -491,7 +520,11 @@ export default function CreateOrganizerScreen() {
                                 />
                             }
                         />
-                        <HelperText type="info">Minimum 6 characters required.</HelperText>
+                        {errors.password ? (
+                            <HelperText type="error" visible={true}>{errors.password}</HelperText>
+                        ) : (
+                            <HelperText type="info">Minimum 6 characters required.</HelperText>
+                        )}
                     </Surface>
                 )}
 

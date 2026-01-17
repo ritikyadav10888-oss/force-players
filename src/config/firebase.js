@@ -1,15 +1,16 @@
-import { initializeApp, getApp, getApps } from 'firebase/app';
-import { initializeAuth, getReactNativePersistence, getAuth } from 'firebase/auth';
-import ReactNativeAsyncStorage from '@react-native-async-storage/async-storage';
-import { getFirestore, initializeFirestore, persistentLocalCache, persistentMultipleTabManager } from 'firebase/firestore';
-import { Platform } from 'react-native';
-import { getStorage } from 'firebase/storage';
-import { getFunctions } from 'firebase/functions';
+import { initializeApp, getApps, getApp } from "firebase/app";
+import { getAuth } from "firebase/auth";
+import { getFirestore, enableIndexedDbPersistence } from "firebase/firestore";
+import { getStorage } from "firebase/storage";
+import { getFunctions } from "firebase/functions";
 
-// TODO: User must replace these with real keys
+// For more information on how to access Firebase in your project,
+// see the Firebase documentation: https://firebase.google.com/docs/web/setup#access-firebase
+
 const firebaseConfig = {
     apiKey: "AIzaSyBkvinaYO0DqQPcTm3FGDPE_O7KADBreVQ",
     authDomain: "force-player-register-ap-ade3a.firebaseapp.com",
+    databaseURL: "https://force-player-register-ap-ade3a-default-rtdb.firebaseio.com",
     projectId: "force-player-register-ap-ade3a",
     storageBucket: "force-player-register-ap-ade3a.firebasestorage.app",
     messagingSenderId: "1099168561002",
@@ -17,38 +18,27 @@ const firebaseConfig = {
     measurementId: "G-83LGLFN70E"
 };
 
-// Initialize Firebase App
-const app = getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
+// Initialize Firebase
+const app = !getApps().length ? initializeApp(firebaseConfig) : getApp();
 
-// Initialize Auth
-let auth;
-if (Platform.OS === 'web') {
-    auth = getAuth(app);
-} else {
-    try {
-        auth = initializeAuth(app, {
-            persistence: getReactNativePersistence(ReactNativeAsyncStorage)
-        });
-    } catch (e) {
-        // Fallback to getAuth if already initialized
-        auth = getAuth(app);
-    }
-}
+// Initialize Firebase services
+const auth = getAuth(app);
+const db = getFirestore(app);
 
-// Initialize Firestore
-let db;
-try {
-    const cacheConfig = Platform.OS === 'web'
-        ? { localCache: persistentLocalCache({ tabManager: persistentMultipleTabManager() }) }
-        : {}; // Standard mobile config
-
-    db = initializeFirestore(app, cacheConfig);
-} catch (error) {
-    // Fallback to getFirestore if already initialized
-    db = getFirestore(app);
+// Enable offline persistence for Firestore
+if (typeof window !== 'undefined') {
+    enableIndexedDbPersistence(db, {
+        synchronizeTabs: true // Enable multi-tab sync
+    }).catch((err) => {
+        if (err.code === 'failed-precondition') {
+            console.warn('Persistence failed: Multiple tabs open');
+        } else if (err.code === 'unimplemented') {
+            console.warn('Persistence not available in this browser');
+        }
+    });
 }
 
 const storage = getStorage(app);
 const functions = getFunctions(app);
 
-export { auth, db, storage, functions, firebaseConfig };
+export { app, auth, db, storage, functions };

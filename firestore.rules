@@ -54,6 +54,9 @@ service cloud.firestore {
         (!('accessExpiryDate' in request.resource.data) || request.resource.data.accessExpiryDate == resource.data.accessExpiryDate) &&
         (!('isVerified' in request.resource.data) || request.resource.data.isVerified == resource.data.isVerified)
       );
+      
+      // Allow owners to delete organizer accounts
+      allow delete: if isOwner();
     }
 
     // 2. Tournaments Collection
@@ -85,11 +88,23 @@ service cloud.firestore {
                     || (isSignedIn() && (request.auth.uid == resource.data.userId || (request.auth.token.email != null && request.auth.token.email == resource.data.email)));
 
         // Update:
-        // - Owners/Organizers can manage registrations
-        // - Players can update their details AND update 'paid' status (client-side payment flow)
+        // - Owners/Organizers can manage registrations (full access)
+        // - Cloud Functions can update payment status (via service account)
+        // - Players CANNOT update payment-related fields (paid, paidAmount, status)
         allow update: if isOwner() 
                     || (isOrganizer() && get(/databases/$(database)/documents/tournaments/$(tournamentId)).data.organizerId == request.auth.uid)
-                    || (isSignedIn() && (request.auth.uid == resource.data.userId || (request.auth.token.email != null && request.auth.token.email == resource.data.email)));
+                    || (isSignedIn() && (
+                        request.auth.uid == resource.data.userId || 
+                        (request.auth.token.email != null && request.auth.token.email == resource.data.email)
+                      ) && (
+                        // SEC-01 ENHANCED: Prevent players from modifying payment fields
+                        // Players can only update non-payment fields
+                        request.resource.data.paid == resource.data.paid &&
+                        request.resource.data.paidAmount == resource.data.paidAmount &&
+                        request.resource.data.status == resource.data.status &&
+                        // Allow updating other fields like name, phone, etc.
+                        (!('paymentId' in request.resource.data) || request.resource.data.paymentId == resource.data.paymentId)
+                      ));
         
         allow delete: if isOwner();
       }
@@ -98,15 +113,30 @@ service cloud.firestore {
 
     // 3. Master Players List (Data Deduplication)
     match /master_players/{playerEmail} {
-      // Create: Allow authenticated users (including anonymous) to create records
+      // Create: Allow authenticated users to create records
       allow create: if isSignedIn();
       
-      // Update: Allow authenticated users to update records (simplified for anonymous access)
-      allow update: if isOwner() || isSignedIn();
+      // Update: Allow Owners or the player themselves to update records
+      allow update: if isOwner() || (isSignedIn() && (
+        request.auth.token.email == playerEmail || 
+        request.auth.uid == resource.data.userId
+      ));
 
+      // Read: Restricted to Owners or the specific user
+      allow read: if isOwner() || (isSignedIn() && (
+        request.auth.token.email == playerEmail || 
+        request.auth.uid == resource.data.userId
+      ));
+    }
+
+    // 4. Mail Collection (For Firebase Extension - Trigger Email)
+    match /mail/{mailId} {
+      // Allow authenticated users to create email documents
+      allow create: if isSignedIn();
       
-      // Read: Restricted to Owners or authenticated users
-      allow read: if isOwner() || isSignedIn();
+      // Only the extension service account can read/update/delete
+      // (Extension will handle delivery status updates)
+      allow read, update, delete: if false;
     }
   }
 }

@@ -1,20 +1,24 @@
 import React, { useState, useEffect } from 'react';
 import { View, StyleSheet, FlatList, RefreshControl, Alert, Platform } from 'react-native';
-import { Title, Text, Surface, useTheme, Avatar, FAB, Divider, Searchbar, IconButton } from 'react-native-paper';
+import { Title, Text, Surface, useTheme, Avatar, FAB, Divider, Searchbar, IconButton, Button, Portal, Dialog, Paragraph } from 'react-native-paper';
 import { useRouter } from 'expo-router';
 import { collection, query, where, getDocs, deleteDoc, doc } from 'firebase/firestore';
 import { db } from '../../src/config/firebase';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 
-const executeDelete = async (id, setOrganizers) => {
+const executeDelete = async (id, setOrganizers, setDeletingId) => {
+    setDeletingId(id);
     try {
         await deleteDoc(doc(db, "users", id));
         setOrganizers(prev => prev.filter(item => item.id !== id));
-        if (Platform.OS !== 'web') Alert.alert("Success", "Organizer deleted successfully.");
+        if (Platform.OS === 'web') alert("Organizer deleted successfully.");
+        else Alert.alert("Success", "Organizer deleted successfully.");
     } catch (error) {
         console.error(error);
-        if (Platform.OS !== 'web') Alert.alert("Error", "Failed to delete organizer.");
-        else alert("Failed to delete organizer: " + error.message);
+        if (Platform.OS === 'web') alert("Failed to delete organizer: " + error.message);
+        else Alert.alert("Error", "Failed to delete organizer.");
+    } finally {
+        setDeletingId(null);
     }
 };
 
@@ -25,6 +29,8 @@ export default function OrganizersScreen() {
     const [loading, setLoading] = useState(true);
     const [refreshing, setRefreshing] = useState(false);
     const [searchQuery, setSearchQuery] = useState('');
+    const [confirmDeleteId, setConfirmDeleteId] = useState(null);
+    const [deletingId, setDeletingId] = useState(null);
 
     const fetchOrganizers = async () => {
         try {
@@ -48,9 +54,7 @@ export default function OrganizersScreen() {
 
     const handleDelete = (id) => {
         if (Platform.OS === 'web') {
-            if (window.confirm("Are you sure you want to delete this organizer? This action cannot be undone.")) {
-                executeDelete(id, setOrganizers);
-            }
+            setConfirmDeleteId(id);
         } else {
             Alert.alert(
                 "Delete Organizer",
@@ -60,7 +64,7 @@ export default function OrganizersScreen() {
                     {
                         text: "Delete",
                         style: "destructive",
-                        onPress: () => executeDelete(id, setOrganizers)
+                        onPress: () => executeDelete(id, setOrganizers, setDeletingId)
                     }
                 ]
             );
@@ -108,35 +112,86 @@ export default function OrganizersScreen() {
                             <Divider style={{ marginVertical: 10 }} />
 
                             <View style={styles.actionRow}>
-                                <IconButton
+                                <Button
+                                    mode="text"
                                     icon="eye"
-                                    size={20}
+                                    compact
                                     onPress={() => router.push({ pathname: '/(owner)/organizer-details', params: { id: item.id } })}
-                                />
-                                <IconButton
+                                    style={{ marginHorizontal: 2 }}
+                                >
+                                    Details
+                                </Button>
+                                <Button
+                                    mode="text"
                                     icon="pencil"
-                                    size={20}
+                                    compact
                                     onPress={() => router.push({ pathname: '/(owner)/create-organizer', params: { editId: item.id } })}
-                                />
-                                <IconButton
+                                    style={{ marginHorizontal: 2 }}
+                                >
+                                    Edit
+                                </Button>
+                                <Button
+                                    mode="text"
                                     icon="plus"
-                                    size={20}
-                                    iconColor={theme.colors.primary}
-                                    style={{ backgroundColor: theme.colors.elevation.level2 }}
+                                    compact
+                                    textColor={theme.colors.primary}
                                     onPress={() => router.push({ pathname: '/(owner)/create-tournament', params: { organizerId: item.id } })}
-                                />
-                                <IconButton
+                                    style={{ marginHorizontal: 2 }}
+                                >
+                                    Assign
+                                </Button>
+                                <Button
+                                    mode="text"
                                     icon="delete"
-                                    size={20}
-                                    iconColor={theme.colors.error}
+                                    compact
+                                    textColor={theme.colors.error}
                                     onPress={() => handleDelete(item.id)}
-                                />
+                                    loading={deletingId === item.id}
+                                    disabled={deletingId === item.id}
+                                    style={{ marginHorizontal: 2 }}
+                                >
+                                    {deletingId === item.id ? "Deleting..." : "Delete"}
+                                </Button>
                             </View>
                         </Surface>
                     )}
                     ListEmptyComponent={<Text style={{ textAlign: 'center', marginTop: 20, color: 'gray' }}>No organizers found.</Text>}
                 />
             </View>
+
+            {/* Delete Confirmation Dialog */}
+            <Portal>
+                <Dialog visible={confirmDeleteId !== null} onDismiss={() => setConfirmDeleteId(null)} style={{ borderRadius: 16 }}>
+                    <Dialog.Icon icon="alert-circle-outline" size={48} color={theme.colors.error} />
+                    <Dialog.Title style={{ textAlign: 'center', fontSize: 20, fontWeight: 'bold' }}>Delete Organizer</Dialog.Title>
+                    <Dialog.Content>
+                        <Paragraph style={{ textAlign: 'center', fontSize: 15, color: '#666' }}>
+                            Are you sure you want to delete this organizer? This action cannot be undone.
+                        </Paragraph>
+                    </Dialog.Content>
+                    <Dialog.Actions style={{ paddingHorizontal: 24, paddingBottom: 20 }}>
+                        <Button
+                            onPress={() => setConfirmDeleteId(null)}
+                            mode="outlined"
+                            style={{ marginRight: 8, borderRadius: 8 }}
+                        >
+                            Cancel
+                        </Button>
+                        <Button
+                            onPress={() => {
+                                executeDelete(confirmDeleteId, setOrganizers, setDeletingId);
+                                setConfirmDeleteId(null);
+                            }}
+                            mode="contained"
+                            buttonColor={theme.colors.error}
+                            icon="delete"
+                            style={{ borderRadius: 8 }}
+                        >
+                            Delete
+                        </Button>
+                    </Dialog.Actions>
+                </Dialog>
+            </Portal>
 
             <FAB
                 icon="plus"

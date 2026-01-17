@@ -193,7 +193,7 @@ export default function PlayerHome() {
                     keyExtractor={item => item.id}
                     contentContainerStyle={styles.contentStyle}
                     ListHeaderComponent={
-                        userData?.role === 'organizer' && tournaments.length > 0 ? (
+                        userData?.role === 'organizer' && tournaments.length > 0 && user ? (
                             <Surface style={styles.masterLinkCard} elevation={2}>
                                 <View style={{ flexDirection: 'row', alignItems: 'center' }}>
                                     <View style={styles.masterIconCircle}>
@@ -209,7 +209,7 @@ export default function PlayerHome() {
                                         iconColor="white"
                                         size={18}
                                         onPress={() => {
-                                            const url = `${Platform.OS === 'web' ? window.location.origin : 'https://force-player-register-ap-ade3a.web.app'}/organizer/${user.uid}`;
+                                            const url = `${Platform.OS === 'web' ? window.location.origin : 'https://force-player-register-ap-ade3a.web.app'}/organizer/${user?.uid}`;
                                             const msg = encodeURIComponent(`Check out my upcoming tournaments: ${url}`);
                                             if (Platform.OS === 'web') window.open(`https://wa.me/?text=${msg}`, '_blank');
                                             else Linking.openURL(`whatsapp://send?text=${msg}`);
@@ -218,12 +218,12 @@ export default function PlayerHome() {
                                 </View>
                                 <View style={styles.masterLinkRow}>
                                     <Text style={styles.masterLinkText} numberOfLines={1}>
-                                        {Platform.OS === 'web' ? window.location.origin : 'https://force-player-register-ap-ade3a.web.app'}/organizer/{user.uid}
+                                        {Platform.OS === 'web' ? window.location.origin : 'https://force-player-register-ap-ade3a.web.app'}/organizer/{user?.uid}
                                     </Text>
                                     <TouchableOpacity
                                         style={{ backgroundColor: 'white', padding: 6, borderRadius: 8, elevation: 2 }}
                                         onPress={() => {
-                                            const url = `${Platform.OS === 'web' ? window.location.origin : 'https://force-player-register-ap-ade3a.web.app'}/organizer/${user.uid}`;
+                                            const url = `${Platform.OS === 'web' ? window.location.origin : 'https://force-player-register-ap-ade3a.web.app'}/organizer/${user?.uid}`;
                                             Share.share({ message: `Check out my upcoming tournaments: ${url}`, url });
                                         }}
                                     >

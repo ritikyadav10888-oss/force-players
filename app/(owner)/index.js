@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { View, StyleSheet, ScrollView, ActivityIndicator, Image, Pressable, RefreshControl, Alert, Platform } from 'react-native';
-import { Button, Title, Text, Surface, useTheme, Avatar, Searchbar, FAB, IconButton, Divider, SegmentedButtons, Chip } from 'react-native-paper';
+import { Button, Title, Text, Surface, useTheme, Avatar, Searchbar, IconButton, Divider, SegmentedButtons, Chip } from 'react-native-paper';
 import { useRouter } from 'expo-router';
 import { useAuth } from '../../src/context/AuthContext';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -417,16 +417,8 @@ export default function OwnerDashboard() {
                         </View>
                     ) : (
                         activeTournaments.map((t) => {
-                            // Date Check
-                            let canEnd = false;
-                            if (t.startDate) {
-                                const start = new Date(t.startDate);
-                                const today = new Date();
-                                // Reset time parts to ensure fair date-only comparison
-                                start.setHours(0, 0, 0, 0);
-                                today.setHours(0, 0, 0, 0);
-                                canEnd = today >= start;
-                            }
+                            // Allow Owner to end tournament anytime
+                            const canEnd = true;
 
                             return (
                                 <Surface key={t.id} style={styles.organizerCard} elevation={1}>
@@ -443,22 +435,28 @@ export default function OwnerDashboard() {
                                             <Text style={{ fontSize: 12, color: 'gray' }}>
                                                 <MaterialCommunityIcons name="currency-inr" /> Entry: {t.entryFee}
                                             </Text>
-                                            <Pressable onPress={() => router.push(`/(owner)/tournament-players/${t.id}`)}>
-                                                <Text style={{ fontSize: 13, color: '#1565C0', marginTop: 4, fontWeight: 'bold', textDecorationLine: 'underline' }}>
-                                                    <MaterialCommunityIcons name="account-group" size={14} /> {t.playerCount || 0} Players (View)
-                                                </Text>
-                                            </Pressable>
+                                            <View style={{ gap: 5, marginTop: 4 }}>
+                                                <Pressable onPress={() => router.push(`/(owner)/tournament-players/${t.id}`)}>
+                                                    <Text style={{ fontSize: 13, color: '#1565C0', fontWeight: 'bold', textDecorationLine: 'underline' }}>
+                                                        <MaterialCommunityIcons name="account-group" size={14} /> {t.playerCount || 0} Players (View)
+                                                    </Text>
+                                                </Pressable>
+                                                <Pressable onPress={() => router.push(`/(owner)/tournament-details/${t.id}`)}>
+                                                    <Text style={{ fontSize: 13, color: theme.colors.primary, fontWeight: 'bold', textDecorationLine: 'underline' }}>
+                                                        <MaterialCommunityIcons name="information-outline" size={14} /> Details
+                                                    </Text>
+                                                </Pressable>
+                                            </View>
                                         </View>
                                         <Button
                                             mode="contained"
                                             compact
                                             color="red"
-                                            buttonColor={canEnd ? theme.colors.error : '#ccc'}
-                                            icon={canEnd ? "stop-circle-outline" : "clock-outline"}
-                                            disabled={!canEnd}
+                                            buttonColor={theme.colors.error}
+                                            icon="stop-circle-outline"
                                             onPress={() => handleEndTournament(t)}
                                         >
-                                            {canEnd ? "End Tournament" : "In Progress"}
+                                            End Tournament
                                         </Button>
                                     </View>
                                 </Surface>
@@ -519,7 +517,7 @@ export default function OwnerDashboard() {
                             </Surface>
                         ))
                     )}
-                    <View style={{ height: 80 }} />
+                    <View style={{ height: 120 }} />
                 </ScrollView>
             ) : (
                 <ScrollView
@@ -600,18 +598,9 @@ export default function OwnerDashboard() {
                             </Surface>
                         ))
                     )}
-                    <View style={{ height: 100 }} />
+                    <View style={{ height: 120 }} />
                 </ScrollView>
             )}
-
-            {/* Create Tournament FAB - actually for Organizers in this context or general actions */}
-            <FAB
-                icon="plus"
-                style={styles.fab}
-                label="New Organizer"
-                onPress={() => router.push('/(owner)/create-organizer')}
-                visible={activeTab === 'overview'} // Only show on overview/organizer tab
-            />
         </SafeAreaView>
     );
 }
@@ -747,11 +736,5 @@ const styles = StyleSheet.create({
     activeText: { fontSize: 11, color: '#2E7D32', fontWeight: '800', letterSpacing: 0.5 },
     orgFooter: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingTop: 8 },
     emptyState: { alignItems: 'center', marginTop: 40, opacity: 0.6 },
-    fab: {
-        position: 'absolute',
-        margin: 16,
-        right: 0,
-        bottom: 0,
-    },
 });
 // End of file

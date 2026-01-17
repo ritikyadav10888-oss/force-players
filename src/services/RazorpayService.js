@@ -11,7 +11,7 @@ if (Platform.OS !== 'web') {
 }
 
 // Get from Env or Fallback
-const RAZORPAY_KEY_ID = Constants.expoConfig?.extra?.razorpayKeyId || 'rzp_test_RumA22x2lbG1jk';
+const RAZORPAY_KEY_ID = Constants.expoConfig?.extra?.razorpayKeyId || 'rzp_test_S45Wn70zYz9AOr';
 
 export const RazorpayService = {
     /**

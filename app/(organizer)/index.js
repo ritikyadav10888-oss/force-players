@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { View, StyleSheet, FlatList, Image, TouchableOpacity, Share, Platform, Alert, Dimensions, Linking, ScrollView } from 'react-native';
+import { View, StyleSheet, FlatList, Image, TouchableOpacity, Share, Platform, Alert, useWindowDimensions, Linking, ScrollView } from 'react-native';
 import { Title, Text, Surface, useTheme, Button, ActivityIndicator, IconButton, List, Divider, Chip, Badge, Avatar } from 'react-native-paper';
 import { useRouter } from 'expo-router';
 import { collection, query, where, getDocs, doc, updateDoc, getDoc } from 'firebase/firestore';
@@ -25,11 +25,14 @@ export default function OrganizerDashboard() {
     const [selectedTournament, setSelectedTournament] = useState(null);
     const [teamsToConfigure, setTeamsToConfigure] = useState([]);
     const [uploading, setUploading] = useState(false);
-    const { width } = Dimensions.get('window');
+    const [activeTab, setActiveTab] = useState('dashboard');
+    const [selectedSportFilter, setSelectedSportFilter] = useState('All');
+    const { width } = useWindowDimensions();
+    const isMobile = width < 600;
 
     // Real-time listener for tournaments
+    // Real-time listener for tournaments
     useEffect(() => {
-        console.log("OrganizerDashboard mounted - Refreshing Listener");
         if (!user || !userData) return;
 
         setLoading(true);
@@ -44,7 +47,6 @@ export default function OrganizerDashboard() {
         }
 
         const unsubscribe = Firestore.onSnapshot(q, async (querySnapshot) => {
-            console.log("Tournaments received from snapshot:", querySnapshot.size);
             const list = await Promise.all(querySnapshot.docs.map(async (d) => {
                 const data = { id: d.id, ...d.data() };
 
@@ -237,7 +239,7 @@ export default function OrganizerDashboard() {
     };
 
     const renderItem = ({ item }) => (
-        <Surface style={styles.card} elevation={2}>
+        <Surface style={styles.card} elevation={4}>
             {/* Banner Section */}
             <TouchableOpacity
                 activeOpacity={0.9}
@@ -247,29 +249,44 @@ export default function OrganizerDashboard() {
                 {item.bannerUrl || item.banner ? (
                     <Image source={{ uri: item.bannerUrl || item.banner }} style={styles.banner} resizeMode="cover" />
                 ) : (
-                    <LinearGradient colors={['#304FFE', '#000051']} style={styles.placeholderBanner}>
-                        <MaterialCommunityIcons name="trophy" size={60} color="rgba(255,255,255,0.2)" />
+                    <LinearGradient colors={['#1A237E', '#311B92']} style={styles.placeholderBanner}>
+                        <MaterialCommunityIcons name="trophy-variant" size={70} color="rgba(255,255,255,0.2)" />
                     </LinearGradient>
                 )}
 
-                <LinearGradient colors={['transparent', 'rgba(0,0,0,0.9)']} style={styles.gradient} />
+                <LinearGradient colors={['transparent', 'rgba(0,0,0,0.85)']} style={styles.gradient} />
 
                 <View style={styles.bannerContent}>
-                    <Chip icon="crown" style={styles.prizeChip} textStyle={{ color: 'white', fontWeight: 'bold' }}>₹{item.winningPrize || '0'}</Chip>
+                    <View style={styles.cardBadgeRow}>
+                        <Surface style={styles.prizeBadge} elevation={4}>
+                            <MaterialCommunityIcons name="crown" size={16} color="#FFD700" />
+                            <Text style={styles.prizeValue}>₹{item.winningPrize || '0'}</Text>
+                        </Surface>
+                        {item.status === 'live' && (
+                            <Surface style={styles.liveBadge} elevation={2}>
+                                <View style={styles.pulseDot} />
+                                <Text style={styles.liveText}>LIVE</Text>
+                            </Surface>
+                        )}
+                    </View>
                     <Title style={styles.cardTitle} numberOfLines={2}>{item.name}</Title>
-                    <Text style={styles.gameName}><MaterialCommunityIcons name="gamepad-variant" /> {item.gameName} ( {item.entryType} )</Text>
+                    <View style={styles.cardMetaRow}>
+                        <MaterialCommunityIcons name="gamepad-variant" size={14} color="#BDBDBD" />
+                        <Text style={styles.gameNameMeta}>{item.gameName} • {item.entryType}</Text>
+                    </View>
                 </View>
 
-                <View style={styles.feeBadge}>
-                    <Text style={{ color: 'white', fontWeight: 'bold', fontSize: 12 }}>ENTRY</Text>
-                    <Text style={{ color: 'white', fontWeight: 'bold', fontSize: 16 }}>₹{item.entryFee}</Text>
-                </View>
+                {/* Glassmorphism Fee Badge */}
+                <Surface style={styles.feeGlassBadge} elevation={0}>
+                    <Text style={styles.feeLabel}>ENTRY</Text>
+                    <Text style={styles.feeAmount}>₹{item.entryFee}</Text>
+                </Surface>
 
                 {item.accessExpiryDate && (
-                    <View style={[styles.expiryBadge, { backgroundColor: new Date() > new Date(item.accessExpiryDate) ? '#d32f2f' : '#FF9800' }]}>
-                        <MaterialCommunityIcons name="clock-alert-outline" size={12} color="white" />
-                        <Text style={{ color: 'white', fontWeight: 'bold', fontSize: 10, marginLeft: 4 }}>
-                            {new Date() > new Date(item.accessExpiryDate) ? 'ACCESS EXPIRED' : `ACCESS UNTIL: ${new Date(item.accessExpiryDate).toLocaleDateString()}`}
+                    <View style={[styles.expiryBadge, { backgroundColor: new Date() > new Date(item.accessExpiryDate) ? '#EF5350' : '#FF9800' }]}>
+                        <MaterialCommunityIcons name="clock-outline" size={12} color="white" />
+                        <Text style={styles.expiryText}>
+                            {new Date() > new Date(item.accessExpiryDate) ? 'EXPIRED' : `UNTIL: ${new Date(item.accessExpiryDate).toLocaleDateString()}`}
                         </Text>
                     </View>
                 )}
@@ -279,363 +296,488 @@ export default function OrganizerDashboard() {
             <View style={styles.cardContent}>
                 {/* Modern Status Row */}
                 <View style={styles.statusRow}>
-                    <View style={styles.statusBadge}>
-                        <MaterialCommunityIcons name="calendar-clock" size={16} color="#1565C0" />
-                        <Text style={styles.statusText}>{item.startDate || 'TBA'}</Text>
+                    <View style={styles.infoBadge}>
+                        <MaterialCommunityIcons name="calendar-clock" size={16} color="#3F51B5" />
+                        <Text style={styles.infoText}>{item.startDate || 'TBA'} {item.startTime ? `• ${item.startTime}` : ''}</Text>
                     </View>
-                    <View style={[styles.statusBadge, { flex: 1, marginLeft: 8 }]}>
-                        <MaterialCommunityIcons name="map-marker-radius" size={16} color="#C62828" />
-                        <Text style={[styles.statusText, { color: '#333' }]} numberOfLines={1}>{item.address || 'Venue TBA'}</Text>
+                    <View style={[styles.infoBadge, { flex: 1, marginLeft: 10 }]}>
+                        <MaterialCommunityIcons name="map-marker" size={16} color="#E91E63" />
+                        <Text style={styles.infoText} numberOfLines={1}>{item.address || 'Venue TBA'}</Text>
                     </View>
                 </View>
 
-                <Divider style={{ marginBottom: 10 }} />
+                <Divider style={styles.cardDivider} />
 
-                <List.Accordion
-                    title="View Rules & Details"
-                    left={props => <Avatar.Icon {...props} icon="text-box-search-outline" size={32} style={{ backgroundColor: '#E3F2FD' }} color="#1565C0" />}
-                    style={styles.accordionHeader}
-                    titleStyle={{ fontSize: 15, fontWeight: '600', color: '#333' }}
-                >
-                    <View style={styles.accordionContent}>
-                        {/* Stats Row */}
-                        <View style={styles.statsRow}>
-                            <View style={styles.statBox}>
-                                <Text style={styles.statLabel}>EARNINGS</Text>
-                                <Title style={styles.statValue}>₹{item.totalCollected || 0}</Title>
-                            </View>
-                            <View style={[styles.statDividerVertical]} />
-                            <View style={styles.statBox}>
-                                <Text style={styles.statLabel}>PLAYERS</Text>
-                                <Title style={styles.statValue}>{item.playerCount || 0}</Title>
-                            </View>
-                        </View>
-
-                        <View style={styles.detailsGrid}>
-                            <View style={styles.detailCard}>
-                                <MaterialCommunityIcons name="calendar-start" size={20} color={theme.colors.primary} />
-                                <View style={{ marginLeft: 8 }}>
-                                    <Text style={styles.detailLabel}>START</Text>
-                                    <Text style={styles.detailValue}>{item.startDate} {item.startTime}</Text>
+                <List.AccordionGroup>
+                    <List.Accordion
+                        title="Rules & Parameters"
+                        left={props => <Avatar.Icon {...props} icon="text-box-search-outline" size={32} style={{ backgroundColor: '#E8EAF6' }} color="#1A237E" />}
+                        style={styles.accordionHeader}
+                        titleStyle={styles.accordionTitle}
+                        id="1"
+                    >
+                        <View style={styles.accordionContent}>
+                            {/* Internal Stats Summary */}
+                            <View style={styles.internalStatsRow}>
+                                <View style={styles.internalStatItem}>
+                                    <Text style={styles.internalStatLabel}>COLLECTED</Text>
+                                    <Text style={styles.internalStatValue}>₹{item.totalCollected || 0}</Text>
+                                </View>
+                                <View style={styles.verticalDivider} />
+                                <View style={styles.internalStatItem}>
+                                    <Text style={styles.internalStatLabel}>PLAYERS</Text>
+                                    <Text style={styles.internalStatValue}>{item.playerCount || 0}</Text>
                                 </View>
                             </View>
-                            <View style={styles.detailCard}>
-                                <MaterialCommunityIcons name="calendar-end" size={20} color={theme.colors.primary} />
-                                <View style={{ marginLeft: 8 }}>
-                                    <Text style={styles.detailLabel}>END</Text>
-                                    <Text style={styles.detailValue}>{item.endDate || 'N/A'}</Text>
-                                </View>
-                            </View>
-                        </View>
 
-                        <View style={[styles.detailsGrid, { marginTop: 10 }]}>
-                            <View style={styles.detailCard}>
-                                <MaterialCommunityIcons name="calendar-alert" size={20} color="#d32f2f" />
-                                <View style={{ marginLeft: 8 }}>
-                                    <Text style={styles.detailLabel}>REGISTRATION DEADLINE</Text>
-                                    <Text style={styles.detailValue}>{item.registrationLastDate || 'N/A'}</Text>
-                                </View>
-                            </View>
-                            <View style={styles.detailCard}>
-                                <MaterialCommunityIcons name="format-list-bulleted" size={20} color={theme.colors.primary} />
-                                <View style={{ marginLeft: 8 }}>
-                                    <Text style={styles.detailLabel}>FORMAT</Text>
-                                    <Text style={styles.detailValue}>{item.tournamentType} / {item.entryType}</Text>
-                                </View>
-                            </View>
-                        </View>
-
-                        <View style={[styles.detailsGrid, { marginTop: 10 }]}>
-                            <View style={[styles.detailCard, { flex: 1 }]}>
-                                <MaterialCommunityIcons name="identifier" size={20} color="gray" />
-                                <View style={{ marginLeft: 8 }}>
-                                    <Text style={styles.detailLabel}>TOURNAMENT ID</Text>
-                                    <Text style={[styles.detailValue, { fontSize: 10 }]}>{item.id}</Text>
-                                </View>
-                            </View>
-                        </View>
-
-                        <Divider style={{ marginVertical: 10 }} />
-                        <Text style={styles.detailLabel}>Description:</Text>
-                        <Text style={styles.detailText}>{item.description || 'No description provided.'}</Text>
-                        <Divider style={{ marginVertical: 10 }} />
-                        <Text style={styles.detailLabel}>Rules:</Text>
-                        <Text style={styles.detailText}>{Array.isArray(item.rules) ? item.rules.join('\n') : (item.rules || 'No rules.')}</Text>
-                    </View>
-                </List.Accordion>
-
-                {/* Player List Accordion */}
-                <List.Accordion
-                    title={`Registered Players (${item.playerCount || 0})`}
-                    left={props => <Avatar.Icon {...props} icon="account-group" size={32} style={{ backgroundColor: '#E8F5E9' }} color="#2E7D32" />}
-                    style={[styles.accordionHeader, { marginTop: 8 }]}
-                    titleStyle={{ fontSize: 15, fontWeight: '600', color: '#333' }}
-                >
-                    <View style={styles.playerListContainer}>
-                        {((item.accessExpiryDate && new Date() > new Date(item.accessExpiryDate)) || item.status === 'completed') ? (
-                            <Text style={{ textAlign: 'center', color: 'gray', padding: 15, fontSize: 13, fontStyle: 'italic' }}>
-                                Player details hidden (Access Expired or Tournament Completed)
-                            </Text>
-                        ) : item.players && item.players.length > 0 ? (
-                            item.players.slice(0, 5).map((player, idx) => (
-                                <Surface key={player.id || idx} style={styles.playerListItem} elevation={1}>
-                                    <Avatar.Text size={36} label={player.playerName?.[0] || 'P'} style={{ backgroundColor: theme.colors.primary }} labelStyle={{ fontSize: 14, color: 'white' }} />
-                                    <View style={{ marginLeft: 12, flex: 1 }}>
-                                        <Text style={{ fontSize: 14, fontWeight: 'bold', color: '#333' }}>{player.playerName}</Text>
-                                        <Text style={{ fontSize: 11, color: 'gray' }}>{player.teamName || 'Solo'}</Text>
+                            <View style={styles.detailsGrid}>
+                                <View style={styles.detailCard}>
+                                    <MaterialCommunityIcons name="clock-start" size={18} color="#1A237E" />
+                                    <View style={{ marginLeft: 10 }}>
+                                        <Text style={styles.gridLabel}>SCHEDULE</Text>
+                                        <Text style={styles.gridValue}>{item.startDate} {item.startTime}</Text>
                                     </View>
-                                    <View style={{ alignItems: 'flex-end' }}>
-                                        <View style={[styles.paidBadge, { backgroundColor: player.paid ? '#E8F5E9' : '#FFEBEE' }]}>
-                                            <Text style={{ fontSize: 10, fontWeight: 'bold', color: player.paid ? '#2E7D32' : '#C62828' }}>{player.paid ? 'PAID' : 'PENDING'}</Text>
-                                        </View>
+                                </View>
+                                <View style={styles.detailCard}>
+                                    <MaterialCommunityIcons name="format-list-bulleted" size={18} color="#1A237E" />
+                                    <View style={{ marginLeft: 10 }}>
+                                        <Text style={styles.gridLabel}>MODE</Text>
+                                        <Text style={styles.gridValue}>{item.tournamentType} / {item.entryType}</Text>
                                     </View>
-                                </Surface>
-                            ))
-                        ) : (
-                            <Text style={{ textAlign: 'center', color: 'gray', padding: 10, fontSize: 12 }}>No players registered yet.</Text>
-                        )}
+                                </View>
+                            </View>
 
-                        {/* Only show 'View All' if NOT expired and NOT completed and has players */}
-                        {item.players && item.players.length > 5 && (!item.accessExpiryDate || new Date() <= new Date(item.accessExpiryDate)) && item.status !== 'completed' && (
-                            <Button mode="text" compact onPress={() => router.push(`/(organizer)/players/${item.id}`)} style={{ marginTop: 5 }}>
-                                View All {item.players.length} Players
-                            </Button>
-                        )}
-                    </View>
-                </List.Accordion>
+                            <Text style={styles.sectionHeading}>Description</Text>
+                            <Text style={styles.bodyText}>{item.description || 'No description provided.'}</Text>
 
-                {/* Teams Overview for Team-Related */}
-                {(item.tournamentType === 'Team' || (item.tournamentType === 'Normal' && item.entryType === 'Team')) && (
-                    <View style={styles.teamsSection}>
-                        <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
-                            <Text style={styles.detailLabel}>Teams Overview ({item.teams?.length || 0}/{item.maxTeams || item.maxParticipants || 0})</Text>
-                            {item.tournamentType === 'Team' && (
-                                <Button mode="text" compact onPress={() => openConfigModal(item)}>Edit Setup</Button>
+                            <Text style={styles.sectionHeading}>Tournament Rules</Text>
+                            <Text style={styles.bodyText}>{Array.isArray(item.rules) ? item.rules.join('\n') : (item.rules || 'Standard rules apply.')}</Text>
+                        </View>
+                    </List.Accordion>
+
+                    <List.Accordion
+                        title={`Registered Players (${item.playerCount || 0})`}
+                        left={props => <Avatar.Icon {...props} icon="account-group" size={32} style={{ backgroundColor: '#E8F5E9' }} color="#2E7D32" />}
+                        style={[styles.accordionHeader, { marginTop: 10 }]}
+                        titleStyle={styles.accordionTitle}
+                        id="2"
+                    >
+                        <View style={styles.playerListContainer}>
+                            {((item.accessExpiryDate && new Date() > new Date(item.accessExpiryDate)) || item.status === 'completed') ? (
+                                <View style={styles.hiddenNotice}>
+                                    <MaterialCommunityIcons name="lock-outline" size={20} color="#757575" />
+                                    <Text style={styles.hiddenText}>Player details hidden (Expired/Completed)</Text>
+                                </View>
+                            ) : item.players && item.players.length > 0 ? (
+                                <View>
+                                    {item.players.slice(0, 5).map((player, idx) => (
+                                        <Surface key={player.id || idx} style={styles.playerCard} elevation={1}>
+                                            <Avatar.Text size={36} label={player.playerName?.[0] || 'P'} style={styles.playerAvatar} labelStyle={{ fontSize: 14, color: 'white' }} />
+                                            <View style={{ marginLeft: 12, flex: 1 }}>
+                                                <Text style={styles.playerNameText}>{player.playerName}</Text>
+                                                <Text style={styles.playerSubText}>{player.teamName || 'Solo Participant'}</Text>
+                                            </View>
+                                            <View style={[styles.paymentStatusBadge, { backgroundColor: player.paid ? '#E8F5E9' : '#FFF3E0' }]}>
+                                                <Text style={[styles.paymentStatusText, { color: player.paid ? '#2E7D32' : '#E65100' }]}>{player.paid ? 'PAID' : 'PENDING'}</Text>
+                                            </View>
+                                        </Surface>
+                                    ))}
+                                    {item.players.length > 5 && (
+                                        <Button
+                                            mode="text"
+                                            onPress={() => router.push(`/(organizer)/players/${item.id}`)}
+                                            style={styles.viewAllBtn}
+                                            labelStyle={{ color: '#1A237E', fontWeight: 'bold' }}
+                                        >
+                                            VIEW ALL PLAYERS
+                                        </Button>
+                                    )}
+                                </View>
+                            ) : (
+                                <Text style={styles.emptyText}>No registrations yet.</Text>
                             )}
                         </View>
-                        {item.teams && item.teams.length > 0 ? (
-                            <View style={styles.teamGrid}>
-                                {item.teams.map((team, index) => {
-                                    const teamName = typeof team === 'string' ? team : team.name;
-                                    const teamLogo = typeof team === 'string' ? null : team.logoUrl;
-                                    const count = item.teamCounts?.[teamName] || 0;
-                                    const teamPlayers = item.teamPlayers?.[teamName] || [];
+                    </List.Accordion>
+                </List.AccordionGroup>
 
-                                    return (
-                                        <View key={index} style={styles.teamStatusCard}>
-                                            {teamLogo ? (
-                                                <Image source={{ uri: teamLogo }} style={styles.teamMinLogo} resizeMode="cover" />
-                                            ) : (
-                                                <Avatar.Text size={36} label={teamName?.[0] || 'T'} style={{ backgroundColor: '#E8F5E9' }} labelStyle={{ fontSize: 14, color: '#2E7D32' }} />
-                                            )}
-                                            <Text style={styles.teamNameText} numberOfLines={1}>{teamName}</Text>
-                                            <Badge style={{ backgroundColor: count >= item.teamSize ? '#4CAF50' : '#2196F3' }}>
-                                                {count}/{item.teamSize || 0}
-                                            </Badge>
-
-                                            {/* Show enrolled players */}
-                                            {count > 0 && (
-                                                ((item.accessExpiryDate && new Date() > new Date(item.accessExpiryDate)) || item.status === 'completed') ? (
-                                                    <Text style={{ fontSize: 9, color: 'gray', marginTop: 4, fontStyle: 'italic', textAlign: 'center' }}>
-                                                        Players Hidden
-                                                    </Text>
-                                                ) : (
-                                                    <View style={styles.teamPlayersContainer}>
-                                                        <Text style={styles.playersLabel}>Players:</Text>
-                                                        {teamPlayers.map((player, idx) => (
-                                                            <View key={idx} style={styles.playerRow}>
-                                                                <Text style={styles.playerName} numberOfLines={1}>• {player.playerName}</Text>
-                                                                <View style={[styles.miniPaidBadge, {
-                                                                    backgroundColor: player.paid ? '#E8F5E9' : '#FFEBEE'
-                                                                }]}>
-                                                                    <Text style={{
-                                                                        fontSize: 8,
-                                                                        fontWeight: 'bold',
-                                                                        color: player.paid ? '#2E7D32' : '#C62828'
-                                                                    }}>
-                                                                        {player.paid ? 'PAID' : 'PENDING'}
-                                                                    </Text>
-                                                                </View>
-                                                            </View>
-                                                        ))}
-                                                    </View>
-                                                )
-                                            )}
-
-                                            <Text style={{ fontSize: 9, color: 'gray', marginTop: 2 }}>
-                                                {Math.max(0, (item.teamSize || 0) - count)} More Req.
-                                            </Text>
-                                        </View>
-                                    );
-                                })}
-                            </View>
-                        ) : (
-                            item.tournamentType === 'Team' ? (
-                                <Button mode="contained-tonal" icon="shield-edit" onPress={() => openConfigModal(item)}>
-                                    Configure {item.maxTeams} Teams
-                                </Button>
-                            ) : (
-                                <Text style={{ fontSize: 12, color: 'gray', textAlign: 'center', padding: 10 }}>
-                                    No teams defined by the owner.
-                                </Text>
-                            )
-                        )}
+                {/* Teams Section - Only for Team Tournaments */}
+                {(item.tournamentType === 'Team' || (item.tournamentType === 'Normal' && item.entryType === 'Team')) && (
+                    <View style={styles.teamsOverView}>
+                        <View style={styles.sectionHeaderLine}>
+                            <Text style={styles.sectionTitleText}>Teams Overview ({item.teams?.length || 0}/{item.maxTeams || 0})</Text>
+                            {item.tournamentType === 'Team' && (
+                                <TouchableOpacity onPress={() => openConfigModal(item)}>
+                                    <Text style={styles.editSetupLink}>Edit Setup</Text>
+                                </TouchableOpacity>
+                            )}
+                        </View>
+                        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ paddingVertical: 10 }}>
+                            {item.teams?.map((team, index) => {
+                                const teamName = typeof team === 'string' ? team : team.name;
+                                const teamLogo = typeof team === 'string' ? null : team.logoUrl;
+                                const count = item.teamCounts?.[teamName] || 0;
+                                return (
+                                    <Surface key={index} style={styles.miniTeamCard} elevation={2}>
+                                        {teamLogo ? (
+                                            <Image source={{ uri: teamLogo }} style={styles.miniTeamLogo} />
+                                        ) : (
+                                            <Avatar.Icon size={32} icon="shield-outline" style={{ backgroundColor: '#F5F5F5' }} color="#757575" />
+                                        )}
+                                        <Text style={styles.miniTeamName} numberOfLines={1}>{teamName}</Text>
+                                        <Badge style={{ backgroundColor: count >= (item.teamSize || 0) ? '#4CAF50' : '#1A237E', marginTop: 4 }}>
+                                            {count}/{item.teamSize || 0}
+                                        </Badge>
+                                    </Surface>
+                                );
+                            })}
+                        </ScrollView>
                     </View>
                 )}
 
-                <Divider style={{ marginVertical: 15 }} />
+                <Divider style={[styles.cardDivider, { marginVertical: 15 }]} />
 
-                <LinearGradient
-                    colors={['#F5F5F5', '#E3F2FD']}
-                    start={{ x: 0, y: 0 }}
-                    end={{ x: 1, y: 0 }}
-                    style={{ padding: 15, borderRadius: 16, marginBottom: 15, borderWidth: 1, borderColor: '#BBDEFB' }}
-                >
-                    <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-                        <Text style={{ fontSize: 11, color: '#1565C0', fontWeight: 'bold', textTransform: 'uppercase', letterSpacing: 0.5 }}>Share Registration Link</Text>
-                        <MaterialCommunityIcons name="share-variant" size={16} color="#1565C0" />
+                {/* Registration Link Container */}
+                <Surface style={styles.shareSurface} elevation={0}>
+                    <View style={styles.shareInfo}>
+                        <MaterialCommunityIcons name="link-variant" size={18} color="#1A237E" />
+                        <Text style={styles.shareLabel}>Registration Link</Text>
                     </View>
-                    <View style={{ flexDirection: 'row', alignItems: 'center', backgroundColor: 'rgba(255,255,255,0.7)', padding: 10, borderRadius: 10 }}>
-                        <Text style={{ flex: 1, color: '#0D47A1', fontSize: 12, fontWeight: '500' }} numberOfLines={1}>
-                            {Platform.OS === 'web' ? window.location.origin : 'https://force-player-register-ap-ade3a.web.app'}/tournament/{item.id}
-                        </Text>
-                        <TouchableOpacity
-                            onPress={() => handleShare(item.id, item.name)}
-                            style={{ backgroundColor: 'white', padding: 6, borderRadius: 8, elevation: 2, marginLeft: 10 }}
-                        >
-                            <MaterialCommunityIcons name="content-copy" size={18} color="#1565C0" />
+                    <View style={styles.shareActions}>
+                        <TouchableOpacity style={styles.shareIconBtn} onPress={() => shareToWhatsApp(item.id, item.name)}>
+                            <MaterialCommunityIcons name="whatsapp" size={24} color="#25D366" />
+                        </TouchableOpacity>
+                        <TouchableOpacity style={styles.shareIconBtn} onPress={() => handleShare(item.id, item.name)}>
+                            <MaterialCommunityIcons name="share-variant" size={22} color="#1A237E" />
+                        </TouchableOpacity>
+                        <TouchableOpacity style={styles.copyBtnMain} onPress={() => handleShare(item.id, item.name)}>
+                            <MaterialCommunityIcons name="content-copy" size={16} color="white" />
+                            <Text style={styles.copyBtnText}>COPY</Text>
                         </TouchableOpacity>
                     </View>
-                </LinearGradient>
+                </Surface>
 
-                <View style={styles.actionRow}>
-                    <Button
-                        mode="contained"
-                        icon="account-group"
-                        onPress={() => {
-                            if ((item.accessExpiryDate && new Date() > new Date(item.accessExpiryDate)) || item.status === 'completed') {
-                                Alert.alert("Access Expired", "Your management access for this tournament has expired or the tournament has ended. Please contact the administrator.");
-                                return;
-                            }
-                            router.push(`/(organizer)/players/${item.id}`);
-                        }}
-                        style={{ flex: 1, marginRight: 5, borderRadius: 8, opacity: ((item.accessExpiryDate && new Date() > new Date(item.accessExpiryDate)) || item.status === 'completed') ? 0.6 : 1 }}
-                        contentStyle={{ height: 45 }}
-                        buttonColor={((item.accessExpiryDate && new Date() > new Date(item.accessExpiryDate)) || item.status === 'completed') ? '#757575' : theme.colors.primary}
-                    >
-                        {((item.accessExpiryDate && new Date() > new Date(item.accessExpiryDate)) || item.status === 'completed') ? 'Access Expired' : 'Manage'}
-                    </Button>
-
-
-
-                    {/* Social Share Buttons */}
-                    <View style={{ flexDirection: 'row' }}>
-                        <IconButton
-                            icon="whatsapp"
-                            iconColor="white"
-                            containerColor="#25D366"
-                            size={20}
-                            onPress={() => shareToWhatsApp(item.id, item.name)}
-                            style={{ margin: 0, marginRight: 5 }}
-                        />
-                        <IconButton
-                            icon="share-variant"
-                            iconColor="white"
-                            containerColor={theme.colors.primary}
-                            size={20}
-                            onPress={() => handleShare(item.id, item.name)}
-                            style={{ margin: 0 }}
-                        />
-                    </View>
-                </View>
+                <Button
+                    mode="contained"
+                    icon="cog-outline"
+                    onPress={() => {
+                        if ((item.accessExpiryDate && new Date() > new Date(item.accessExpiryDate)) || item.status === 'completed') {
+                            Alert.alert("Access Expired", "Management access has ended.");
+                            return;
+                        }
+                        router.push(`/(organizer)/players/${item.id}`);
+                    }}
+                    style={styles.manageBtnMain}
+                    contentStyle={{ height: 48 }}
+                    buttonColor={((item.accessExpiryDate && new Date() > new Date(item.accessExpiryDate)) || item.status === 'completed') ? '#9E9E9E' : '#1A237E'}
+                >
+                    {((item.accessExpiryDate && new Date() > new Date(item.accessExpiryDate)) || item.status === 'completed') ? 'ACCESS EXPIRED' : 'MANAGE TOURNAMENT'}
+                </Button>
             </View>
-        </Surface >
+        </Surface>
     );
 
     return (
         <SafeAreaView style={{ flex: 1, backgroundColor: '#F0F2F5' }}>
-            <LinearGradient
-                colors={['#4c669f', '#3b5998', '#192f6a']}
-                style={styles.header}
-                start={{ x: 0, y: 0 }}
-                end={{ x: 1, y: 1 }}
-            >
-                <View style={styles.headerContent}>
-                    <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-                        <Surface style={styles.logoSurface} elevation={8}>
-                            <Image source={require('../../assets/logo.png')} style={styles.logo} />
-                        </Surface>
-                        <View>
-                            <Text style={{ color: 'rgba(255,255,255,0.7)', fontSize: 13, letterSpacing: 1, fontWeight: '600', marginBottom: 2 }}>ORGANIZER DASHBOARD</Text>
-                            <Title style={styles.headerTitle}>{user?.displayName || userData?.name || 'Organizer'}</Title>
-                        </View>
+            <View style={styles.headerWrapper}>
+                <LinearGradient
+                    colors={['#1A237E', '#311B92']}
+                    style={styles.header}
+                    start={{ x: 0, y: 0 }}
+                    end={{ x: 1, y: 1 }}
+                >
+                    {/* Decorative background elements */}
+                    <View style={styles.headerBackground}>
+                        <View style={[styles.glowCircle, { top: -20, left: -20, backgroundColor: 'rgba(63, 81, 181, 0.3)' }]} />
+                        <View style={[styles.glowCircle, { bottom: -40, right: -40, backgroundColor: 'rgba(156, 39, 176, 0.2)' }]} />
                     </View>
-                    <IconButton
-                        icon="logout"
-                        iconColor="white"
-                        size={24}
-                        onPress={() => logout()}
-                        style={{ backgroundColor: 'rgba(255,255,255,0.15)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.2)' }}
-                    />
-                </View>
 
-                {/* Dashboard Stats */}
-                {!loading && (
-                    <View style={styles.statsContainer}>
-                        <View style={styles.statItem}>
-                            <Text style={styles.statNumber}>{tournaments.length}</Text>
-                            <Text style={styles.statLabel}>Events</Text>
+                    <View style={styles.headerContent}>
+                        <View style={styles.profileSectionNew}>
+                            <Surface style={styles.avatarSurface} elevation={4}>
+                                <Image source={require('../../assets/logo.png')} style={styles.avatarMain} />
+                            </Surface>
+                            <View style={styles.welcomeTextSection}>
+                                <Text style={styles.welcomeBackLabel}>WELCOME BACK</Text>
+                                <Title style={styles.userNameHeader}>{user?.displayName || userData?.name || 'Organizer'}</Title>
+                            </View>
                         </View>
-                        <View style={styles.statDivider} />
-                        <View style={styles.statItem}>
-                            <Text style={styles.statNumber}>₹{tournaments.reduce((acc, t) => acc + (t.totalCollected || 0), 0)}</Text>
-                            <Text style={styles.statLabel}>Collected</Text>
-                        </View>
-                        <View style={styles.statDivider} />
-                        <View style={styles.statItem}>
-                            <Text style={styles.statNumber}>₹{Math.floor(tournaments.reduce((acc, t) => acc + (t.totalCollected || 0), 0) * 0.95)}</Text>
-                            <Text style={styles.statLabel}>Settlement (95%)</Text>
-                        </View>
+                        <TouchableOpacity onPress={() => logout()} style={styles.logoutIconBtn}>
+                            <MaterialCommunityIcons name="logout-variant" size={22} color="white" />
+                        </TouchableOpacity>
                     </View>
-                )}
-            </LinearGradient>
+                </LinearGradient>
+
+                {/* Reference-style Segmented Control - Overlapping */}
+                <View style={styles.tabBarContainer}>
+                    <Surface style={styles.segmentedTabBar} elevation={6}>
+                        <TouchableOpacity
+                            onPress={() => setActiveTab('dashboard')}
+                            style={[styles.tabItem, activeTab === 'dashboard' && styles.activeTabItem]}
+                        >
+                            <MaterialCommunityIcons
+                                name="view-dashboard"
+                                size={18}
+                                color={activeTab === 'dashboard' ? '#1A237E' : '#757575'}
+                            />
+                            <Text style={[styles.tabLabel, activeTab === 'dashboard' && styles.activeTabLabel]}>Dashboard</Text>
+                        </TouchableOpacity>
+
+                        <TouchableOpacity
+                            onPress={() => setActiveTab('financials')}
+                            style={[styles.tabItem, activeTab === 'financials' && styles.activeTabItem]}
+                        >
+                            <MaterialCommunityIcons
+                                name="chart-bar"
+                                size={18}
+                                color={activeTab === 'financials' ? '#1A237E' : '#757575'}
+                            />
+                            <Text style={[styles.tabLabel, activeTab === 'financials' && styles.activeTabLabel]}>Financials</Text>
+                        </TouchableOpacity>
+                    </Surface>
+                </View>
+            </View>
 
             <View style={styles.mainContainer}>
                 {loading ? (
                     <ActivityIndicator size="large" style={{ marginTop: 50 }} color={theme.colors.primary} />
+                ) : activeTab === 'financials' ? (
+                    /* Advanced Analytics Dashboard with Sport Filtering */
+                    <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 40 }}>
+                        {(() => {
+                            const filteredTournaments = selectedSportFilter === 'All'
+                                ? tournaments
+                                : tournaments.filter(t => (t.gameName || 'Other') === selectedSportFilter);
+
+                            const totalRevenue = filteredTournaments.reduce((acc, t) => acc + (t.totalCollected || 0), 0);
+                            const totalPaidPlayers = filteredTournaments.reduce((acc, t) => acc + (t.playerCount || 0), 0);
+                            const totalPlayers = filteredTournaments.reduce((acc, t) => acc + (t.players?.length || 0), 0);
+                            const totalPending = filteredTournaments.reduce((acc, t) => {
+                                const unpaid = (t.players || []).filter(p => !p.paid).length;
+                                return acc + (unpaid * (parseInt(t.entryFee) || 0));
+                            }, 0);
+                            const conversionRate = totalPlayers > 0 ? Math.round((totalPaidPlayers / totalPlayers) * 100) : 0;
+
+                            return (
+                                <>
+                                    {/* Primary Revenue Card */}
+                                    <Surface style={styles.analyticsCard} elevation={2}>
+                                        <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
+                                            <View>
+                                                <Title style={styles.analyticsTitle}>Financial Growth</Title>
+                                                {selectedSportFilter !== 'All' && (
+                                                    <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 2 }}>
+                                                        <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: '#1A237E', marginRight: 6 }} />
+                                                        <Text style={{ fontSize: 10, color: '#1A237E', fontWeight: 'bold' }}>FILTERED: {selectedSportFilter.toUpperCase()}</Text>
+                                                    </View>
+                                                )}
+                                            </View>
+                                            <View style={{ backgroundColor: '#E8EAF6', paddingHorizontal: 10, paddingVertical: 4, borderRadius: 10 }}>
+                                                <Text style={{ fontSize: 10, fontWeight: '800', color: '#1A237E' }}>THIS MONTH</Text>
+                                            </View>
+                                        </View>
+
+                                        <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 20 }}>
+                                            <View style={{ flex: 1, alignItems: 'center' }}>
+                                                <Text style={styles.analysisLabel}>Net Revenue</Text>
+                                                <Text style={styles.analysisValue}>₹{totalRevenue}</Text>
+                                                <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 4 }}>
+                                                    <MaterialCommunityIcons name="trending-up" size={14} color="#2E7D32" />
+                                                    <Text style={{ fontSize: 10, color: '#2E7D32', fontWeight: 'bold', marginLeft: 2 }}>+12.4%</Text>
+                                                </View>
+                                            </View>
+                                            <View style={{ width: 1, backgroundColor: '#EDF2F7', height: '100%' }} />
+                                            <View style={{ flex: 1, alignItems: 'center' }}>
+                                                <Text style={styles.analysisLabel}>Paid Players</Text>
+                                                <Text style={styles.analysisValue}>{totalPaidPlayers}</Text>
+                                                <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 4 }}>
+                                                    <MaterialCommunityIcons name="account-check" size={14} color="#1A237E" />
+                                                    <Text style={{ fontSize: 10, color: '#1A237E', fontWeight: 'bold', marginLeft: 2 }}>Verified</Text>
+                                                </View>
+                                            </View>
+                                        </View>
+
+                                        <View style={{ marginBottom: 15 }}>
+                                            <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 6 }}>
+                                                <Text style={{ fontSize: 12, color: '#64748B', fontWeight: '600' }}>Payout Eligibility</Text>
+                                                <Text style={{ fontSize: 14, color: '#1A237E', fontWeight: 'bold' }}>₹{Math.floor(totalRevenue * 0.95)}</Text>
+                                            </View>
+                                            <View style={{ height: 6, backgroundColor: '#F1F5F9', borderRadius: 3 }}>
+                                                <View style={{ width: '95%', height: '100%', backgroundColor: '#1A237E', borderRadius: 3 }} />
+                                            </View>
+                                            <Text style={{ fontSize: 10, color: '#94A3B8', marginTop: 6 }}>95% of total revenue is eligible for payout after fees</Text>
+                                        </View>
+                                    </Surface>
+
+                                    {/* Secondary Analytics Grid */}
+                                    <View style={{ flexDirection: 'row', paddingHorizontal: 20, gap: 12, marginBottom: 20 }}>
+                                        <Surface style={{ flex: 1, padding: 16, borderRadius: 20, backgroundColor: 'white' }} elevation={1}>
+                                            <View style={{ width: 36, height: 36, borderRadius: 10, backgroundColor: '#FFF3E0', justifyContent: 'center', alignItems: 'center', marginBottom: 10 }}>
+                                                <MaterialCommunityIcons name="clock-alert-outline" size={20} color="#E65100" />
+                                            </View>
+                                            <Text style={{ fontSize: 11, color: '#64748B', fontWeight: 'bold' }}>Pending</Text>
+                                            <Text style={{ fontSize: 18, color: '#1E293B', fontWeight: '900', marginTop: 4 }}>₹{totalPending}</Text>
+                                            <Text style={{ fontSize: 10, color: '#94A3B8', marginTop: 2 }}>Recoverable</Text>
+                                        </Surface>
+
+                                        <Surface style={{ flex: 1, padding: 16, borderRadius: 20, backgroundColor: 'white' }} elevation={1}>
+                                            <View style={{ width: 36, height: 36, borderRadius: 10, backgroundColor: '#E0F2F1', justifyContent: 'center', alignItems: 'center', marginBottom: 10 }}>
+                                                <MaterialCommunityIcons name="bullseye-arrow" size={20} color="#00695C" />
+                                            </View>
+                                            <Text style={{ fontSize: 11, color: '#64748B', fontWeight: 'bold' }}>Conversion</Text>
+                                            <Text style={{ fontSize: 18, color: '#1E293B', fontWeight: '900', marginTop: 4 }}>{conversionRate}%</Text>
+                                            <View style={{ alignSelf: 'flex-start', backgroundColor: '#E0F2F1', paddingHorizontal: 6, paddingVertical: 2, borderRadius: 4, marginTop: 4 }}>
+                                                <Text style={{ fontSize: 9, color: '#00695C', fontWeight: '800' }}>HIGH</Text>
+                                            </View>
+                                        </Surface>
+                                    </View>
+
+                                    {/* Top Performing Tournament */}
+                                    {filteredTournaments.length > 0 && (
+                                        <Surface style={{ marginHorizontal: 20, padding: 16, borderRadius: 20, backgroundColor: '#1A237E', marginBottom: 20 }} elevation={2}>
+                                            <Text style={{ fontSize: 10, color: 'rgba(255,255,255,0.7)', fontWeight: 'bold', letterSpacing: 1, marginBottom: 12 }}>{selectedSportFilter !== 'All' ? `TOP ${selectedSportFilter.toUpperCase()} EVENT` : 'TOP PERFORMING EVENT'}</Text>
+                                            {(() => {
+                                                const top = [...filteredTournaments].sort((a, b) => (b.totalCollected || 0) - (a.totalCollected || 0))[0];
+                                                return (
+                                                    <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                                                        <View style={{ width: 44, height: 44, borderRadius: 12, backgroundColor: 'rgba(255,255,255,0.15)', justifyContent: 'center', alignItems: 'center' }}>
+                                                            <MaterialCommunityIcons name="medal" size={24} color="#FFD700" />
+                                                        </View>
+                                                        <View style={{ flex: 1, marginLeft: 12 }}>
+                                                            <Text style={{ color: 'white', fontSize: 15, fontWeight: 'bold' }}>{top.name}</Text>
+                                                            <Text style={{ color: 'rgba(255,255,255,0.6)', fontSize: 11, marginTop: 2 }}>{top.playerCount} Paid Players</Text>
+                                                        </View>
+                                                        <Text style={{ color: '#B9F6CA', fontSize: 16, fontWeight: '900' }}>₹{top.totalCollected}</Text>
+                                                    </View>
+                                                );
+                                            })()}
+                                        </Surface>
+                                    )}
+
+                                    {/* Sport Filter Selection chips */}
+                                    <Text style={styles.sectionHeadingAlt}>Filter Dashboard by Sport</Text>
+                                    <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ paddingHorizontal: 20, marginBottom: 25, gap: 12 }}>
+                                        {/* All Sports Option */}
+                                        <TouchableOpacity onPress={() => setSelectedSportFilter('All')}>
+                                            <Surface style={[{ width: 140, padding: 15, borderRadius: 20, backgroundColor: 'white' }, selectedSportFilter === 'All' && { borderWidth: 2, borderColor: '#1A237E' }]} elevation={1}>
+                                                <View style={{ width: 32, height: 32, borderRadius: 8, backgroundColor: '#E8EAF6', justifyContent: 'center', alignItems: 'center' }}>
+                                                    <MaterialCommunityIcons name="apps" size={18} color="#1A237E" />
+                                                </View>
+                                                <Text style={{ fontSize: 13, fontWeight: 'bold', color: '#1E293B', marginTop: 10 }} numberOfLines={1}>All Sports</Text>
+                                                <View style={{ marginTop: 8 }}>
+                                                    <Text style={{ fontSize: 10, color: '#64748B' }}>{tournaments.length} Total </Text>
+                                                    <Text style={{ fontSize: 12, fontWeight: '800', color: '#1A237E', marginTop: 2 }}>Overview</Text>
+                                                </View>
+                                            </Surface>
+                                        </TouchableOpacity>
+
+                                        {(() => {
+                                            const sportStats = tournaments.reduce((acc, t) => {
+                                                const sport = t.gameName || 'Other';
+                                                if (!acc[sport]) acc[sport] = { players: 0, revenue: 0, icon: 'gamepad-variant' };
+                                                acc[sport].players += (t.playerCount || 0);
+                                                acc[sport].revenue += (t.totalCollected || 0);
+
+                                                if (sport.toLowerCase().includes('cricket')) acc[sport].icon = 'cricket';
+                                                if (sport.toLowerCase().includes('football')) acc[sport].icon = 'soccer';
+                                                if (sport.toLowerCase().includes('badminton')) acc[sport].icon = 'badminton';
+                                                if (sport.toLowerCase().includes('chess')) acc[sport].icon = 'chess-pawn';
+                                                return acc;
+                                            }, {});
+
+                                            return Object.entries(sportStats).map(([sport, stats], i) => (
+                                                <TouchableOpacity key={i} onPress={() => setSelectedSportFilter(sport)}>
+                                                    <Surface style={[{ width: 140, padding: 15, borderRadius: 20, backgroundColor: 'white' }, selectedSportFilter === sport && { borderWidth: 2, borderColor: '#1A237E' }]} elevation={1}>
+                                                        <View style={{ width: 32, height: 32, borderRadius: 8, backgroundColor: '#F0F4F8', justifyContent: 'center', alignItems: 'center' }}>
+                                                            <MaterialCommunityIcons name={stats.icon} size={18} color="#1A237E" />
+                                                        </View>
+                                                        <Text style={{ fontSize: 13, fontWeight: 'bold', color: '#1E293B', marginTop: 10 }} numberOfLines={1}>{sport}</Text>
+                                                        <View style={{ marginTop: 8 }}>
+                                                            <Text style={{ fontSize: 10, color: '#64748B' }}>{stats.players} </Text>
+                                                            <Text style={{ fontSize: 12, fontWeight: '800', color: '#1A237E', marginTop: 2 }}>₹{stats.revenue}</Text>
+                                                        </View>
+                                                    </Surface>
+                                                </TouchableOpacity>
+                                            ));
+                                        })()}
+                                    </ScrollView>
+
+                                    <Text style={styles.sectionHeadingAlt}>{selectedSportFilter !== 'All' ? `${selectedSportFilter} Recent Activity` : 'Recent Player Payments'}</Text>
+                                    {(() => {
+                                        const allPayments = filteredTournaments.flatMap(t =>
+                                            (t.players || [])
+                                                .filter(p => p.paid === true)
+                                                .map(p => ({
+                                                    ...p,
+                                                    tournamentName: t.name,
+                                                    amount: t.entryFee,
+                                                    date: t.startDate
+                                                }))
+                                        ).sort((a, b) => new Date(b.registrationDate || 0) - new Date(a.registrationDate || 0));
+
+                                        return (
+                                            allPayments.length > 0 ? (
+                                                allPayments.slice(0, 10).map((payment, i) => (
+                                                    <Surface key={i} style={styles.transactionItem} elevation={1}>
+                                                        <Avatar.Icon size={40} icon="account-cash" style={{ backgroundColor: '#E8EAF6' }} color="#1A237E" />
+                                                        <View style={{ marginLeft: 12, flex: 1 }}>
+                                                            <Text style={styles.txnName}>{payment.playerName}</Text>
+                                                            <Text style={styles.txnDate} numberOfLines={1}>{payment.tournamentName}</Text>
+                                                        </View>
+                                                        <View style={{ alignItems: 'flex-end' }}>
+                                                            <Text style={styles.txnAmount}>+₹{payment.amount}</Text>
+                                                            <Text style={{ fontSize: 9, color: '#94A3B8' }}>{payment.date || 'Success'}</Text>
+                                                        </View>
+                                                    </Surface>
+                                                ))
+                                            ) : (
+                                                <View style={styles.emptyActivity}>
+                                                    <Text style={styles.emptyText}>No recent payments found {selectedSportFilter !== 'All' ? `for ${selectedSportFilter}` : ''}.</Text>
+                                                </View>
+                                            )
+                                        );
+                                    })()}
+                                </>
+                            );
+                        })()}
+                    </ScrollView>
                 ) : (
+                    /* Dashboard View - Tournament List */
                     <FlatList
                         data={tournaments}
                         renderItem={renderItem}
                         keyExtractor={item => item.id}
                         ListHeaderComponent={
-                            !loading && tournaments.length > 0 ? (
-                                <Surface style={styles.masterShareCard} elevation={2}>
-                                    <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 12 }}>
-                                        <View style={styles.masterIconCircle}>
-                                            <MaterialCommunityIcons name="bullhorn-variant" size={24} color="white" />
+                            !loading && tournaments.length > 0 && user ? (
+                                <Surface style={styles.masterShareCard} elevation={5}>
+                                    <View style={styles.masterHeader}>
+                                        <LinearGradient
+                                            colors={['#3F51B5', '#1A237E']}
+                                            style={styles.masterIconCircle}
+                                        >
+                                            <MaterialCommunityIcons name="share-variant" size={22} color="white" />
+                                        </LinearGradient>
+                                        <View style={{ marginLeft: 15, flex: 1 }}>
+                                            <Text style={styles.masterTitle}>Share Professional Profile</Text>
+                                            <Text style={styles.masterSubtitle}>Enable players to view all your tournaments at once</Text>
                                         </View>
-                                        <View style={{ marginLeft: 12, flex: 1 }}>
-                                            <Text style={{ fontSize: 16, fontWeight: 'bold', color: '#1A237E' }}>Master Profile Link</Text>
-                                            <Text style={{ fontSize: 11, color: '#666' }}>Shares ALL your active tournaments in one page</Text>
-                                        </View>
-                                        <IconButton
-                                            icon="whatsapp"
-                                            containerColor="#25D366"
-                                            iconColor="white"
-                                            size={20}
-                                            onPress={() => shareToWhatsApp(user.uid, 'My Profile', true)}
-                                        />
+                                        <TouchableOpacity
+                                            onPress={() => shareToWhatsApp(user?.uid, 'My Profile', true)}
+                                            style={styles.whatsappIconCircle}
+                                        >
+                                            <MaterialCommunityIcons name="whatsapp" size={24} color="#25D366" />
+                                        </TouchableOpacity>
                                     </View>
-                                    <View style={styles.masterLinkRow}>
+                                    <View style={styles.masterLinkContainer}>
+                                        <MaterialCommunityIcons name="link-variant" size={16} color="#757575" style={{ marginRight: 8 }} />
                                         <Text style={styles.masterLinkText} numberOfLines={1}>
-                                            {Platform.OS === 'web' ? window.location.origin : 'https://force-player-register-ap-ade3a.web.app'}/organizer/{user.uid}
+                                            {Platform.OS === 'web' ? window.location.origin : 'https://force-player-register-ap-ade3a.web.app'}/organizer/{user?.uid}
                                         </Text>
                                         <TouchableOpacity
-                                            style={styles.masterCopyBtn}
-                                            onPress={() => handleShare(user.uid, 'My Profile', true)}
+                                            style={styles.masterCopyAction}
+                                            onPress={() => handleShare(user?.uid, 'My Profile', true)}
                                         >
                                             <MaterialCommunityIcons name="content-copy" size={18} color="#1A237E" />
+                                            <Text style={styles.copyText}>COPY</Text>
                                         </TouchableOpacity>
                                     </View>
                                 </Surface>
@@ -699,114 +841,139 @@ export default function OrganizerDashboard() {
 }
 
 const styles = StyleSheet.create({
-    header: { padding: 20, paddingTop: 50, paddingBottom: 40, borderBottomLeftRadius: 36, borderBottomRightRadius: 36, shadowColor: "#1a237e", shadowOpacity: 0.4, shadowRadius: 12, elevation: 10 },
+    headerWrapper: { position: 'relative', marginBottom: 20 },
+    header: { paddingHorizontal: 20, paddingTop: 50, paddingBottom: 60, borderBottomLeftRadius: 40, borderBottomRightRadius: 40 },
+    headerBackground: { ...StyleSheet.absoluteFillObject, borderBottomLeftRadius: 40, borderBottomRightRadius: 40, overflow: 'hidden' },
+    glowCircle: { width: 120, height: 120, borderRadius: 60, position: 'absolute', opacity: 0.6 },
     headerContent: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', width: '100%', maxWidth: 800, alignSelf: 'center' },
-    logoSurface: { borderRadius: 12, padding: 0, elevation: 8, borderWidth: 2, borderColor: 'rgba(255,255,255,0.3)' },
-    logo: { width: 44, height: 44, borderRadius: 10 },
-    headerTitle: { color: 'white', fontWeight: 'bold', fontSize: 22, letterSpacing: 0.5 },
-    headerSubtitle: { color: 'rgba(255,255,255,0.8)', fontSize: 13, marginTop: 2 },
 
-    masterShareCard: { margin: 15, marginBottom: 10, padding: 15, borderRadius: 20, backgroundColor: 'white', borderWidth: 1, borderColor: '#e0e0e0' },
-    masterIconCircle: { width: 44, height: 44, borderRadius: 15, backgroundColor: '#3F51B5', justifyContent: 'center', alignItems: 'center' },
-    masterLinkRow: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#F0F2F5', borderRadius: 12, padding: 10, paddingRight: 5 },
-    masterLinkText: { flex: 1, fontSize: 12, color: '#1A237E', fontWeight: '500' },
-    masterCopyBtn: { padding: 8, backgroundColor: 'white', borderRadius: 8, elevation: 2 },
+    // New Header Styles from Reference
+    profileSectionNew: { flexDirection: 'row', alignItems: 'center' },
+    avatarSurface: { width: 48, height: 48, borderRadius: 24, padding: 3, backgroundColor: 'white', justifyContent: 'center', alignItems: 'center' },
+    avatarMain: { width: 42, height: 42, borderRadius: 21 },
+    welcomeTextSection: { marginLeft: 12 },
+    welcomeBackLabel: { color: 'rgba(255,255,255,0.7)', fontSize: 10, fontWeight: '800', letterSpacing: 1 },
+    userNameHeader: { color: 'white', fontWeight: 'bold', fontSize: 24, lineHeight: 28, marginTop: -2 },
+    logoutIconBtn: { width: 44, height: 44, borderRadius: 22, backgroundColor: 'rgba(255,255,255,0.12)', justifyContent: 'center', alignItems: 'center' },
 
-    statsContainer: { flexDirection: 'row', marginTop: 25, backgroundColor: 'rgba(255,255,255,0.15)', borderRadius: 20, padding: 15, justifyContent: 'space-around', maxWidth: 500, width: '100%', alignSelf: 'center', borderWidth: 1, borderColor: 'rgba(255,255,255,0.2)' },
-    statItem: { alignItems: 'center', flex: 1 },
-    statNumber: { color: 'white', fontSize: 24, fontWeight: '800' },
-    statLabel: { color: 'rgba(255,255,255,0.9)', fontSize: 11, textTransform: 'uppercase', letterSpacing: 1, marginTop: 4 },
-    statDivider: { width: 1, backgroundColor: 'rgba(255,255,255,0.3)', marginVertical: 5 },
+    // Segmented Tab Bar Styles
+    tabBarContainer: { position: 'absolute', bottom: -28, left: 20, right: 20, alignItems: 'center', zIndex: 10 },
+    segmentedTabBar: { flexDirection: 'row', backgroundColor: 'white', borderRadius: 24, width: '100%', maxWidth: 500, padding: 4, height: 56, shadowColor: '#000', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.15, shadowRadius: 8, elevation: 8 },
+    tabItem: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', borderRadius: 20, gap: 10, height: '100%' },
+    activeTabItem: { backgroundColor: '#E8EAF6' }, // Lavender background for 'half-white' look
+    tabLabel: { fontSize: 13, fontWeight: '700', color: '#64748B' },
+    activeTabLabel: { color: '#1A237E' },
 
-    mainContainer: { flex: 1, width: '100%', maxWidth: 800, alignSelf: 'center', padding: 20, marginTop: -25 },
-    card: { borderRadius: 24, backgroundColor: 'white', marginBottom: 24, overflow: 'hidden', elevation: 4, shadowColor: '#000', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.1, shadowRadius: 8 },
+    // Financials/Analytics Styles
+    analyticsCard: { margin: 20, padding: 24, borderRadius: 24, backgroundColor: 'white' },
+    analyticsTitle: { fontSize: 18, fontWeight: 'bold', color: '#1A237E', marginBottom: 20 },
+    analyticsGrid: { flexDirection: 'row', justifyContent: 'space-between' },
+    analysisItem: { flex: 1, alignItems: 'center' },
+    analysisLabel: { fontSize: 11, color: '#64748B', fontWeight: 'bold', textTransform: 'uppercase' },
+    analysisValue: { fontSize: 22, color: '#1E293B', fontWeight: '900', marginTop: 4 },
+    analysisDivider: { width: 1, backgroundColor: '#EDF2F7', height: '100%' },
+    analysisSub: { fontSize: 10, color: '#94A3B8', marginTop: 4 },
+    payoutContainer: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', backgroundColor: '#F8FAFC', padding: 16, borderRadius: 16 },
+    payoutInfo: { flex: 1 },
+    payoutLabel: { fontSize: 12, color: '#64748B', fontWeight: '600' },
+    payoutValue: { fontSize: 20, color: '#2E7D32', fontWeight: '900' },
+    payoutBadge: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 12, paddingVertical: 6, borderRadius: 12, gap: 6 },
+    payoutBadgeText: { color: 'white', fontSize: 10, fontWeight: 'bold' },
+    transactionItem: { flexDirection: 'row', alignItems: 'center', padding: 16, backgroundColor: 'white', borderRadius: 20, marginHorizontal: 20, marginBottom: 12 },
+    txnName: { fontSize: 14, fontWeight: 'bold', color: '#1E293B' },
+    txnDate: { fontSize: 11, color: '#64748B', marginTop: 2 },
+    txnAmount: { fontSize: 15, fontWeight: '900', color: '#2E7D32' },
+    sectionHeadingAlt: { fontSize: 13, fontWeight: 'bold', color: '#475569', marginHorizontal: 20, marginBottom: 15, textTransform: 'uppercase', letterSpacing: 0.5 },
+    emptyActivity: { alignItems: 'center', padding: 40 },
 
-    bannerContainer: { height: 200, position: 'relative' },
+    masterShareCard: { margin: 15, marginBottom: 10, padding: 20, borderRadius: 24, backgroundColor: 'white' },
+    masterHeader: { flexDirection: 'row', alignItems: 'center', marginBottom: 16 },
+    masterIconCircle: { width: 50, height: 50, borderRadius: 18, justifyContent: 'center', alignItems: 'center' },
+    masterTitle: { fontSize: 16, fontWeight: 'bold', color: '#1A237E' },
+    masterSubtitle: { fontSize: 11, color: '#757575', marginTop: 2 },
+    whatsappIconCircle: { width: 44, height: 44, justifyContent: 'center', alignItems: 'center' },
+    masterLinkContainer: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#F5F7FA', borderRadius: 15, paddingLeft: 12, paddingRight: 4, height: 48 },
+    masterLinkText: { flex: 1, fontSize: 12, color: '#424242', fontWeight: '500' },
+    masterCopyAction: { flexDirection: 'row', alignItems: 'center', backgroundColor: 'white', paddingHorizontal: 15, height: 40, borderRadius: 12, elevation: 2 },
+    copyText: { fontSize: 11, fontWeight: 'bold', color: '#1A237E', marginLeft: 6 },
+
+    mainContainer: { flex: 1, width: '100%', maxWidth: 800, alignSelf: 'center', padding: 20, marginTop: 15 },
+    card: { borderRadius: 24, backgroundColor: 'white', marginBottom: 24, overflow: 'hidden', elevation: 8, shadowColor: '#000', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.1, shadowRadius: 10 },
+
+    bannerContainer: { height: 150, position: 'relative' },
     banner: { width: '100%', height: '100%' },
     placeholderBanner: { width: '100%', height: '100%', justifyContent: 'center', alignItems: 'center' },
-    gradient: { position: 'absolute', bottom: 0, left: 0, right: 0, height: '70%' },
+    gradient: { position: 'absolute', bottom: 0, left: 0, right: 0, height: '75%' },
     bannerContent: { position: 'absolute', bottom: 15, left: 15, right: 15 },
-    cardTitle: { color: 'white', fontSize: 22, fontWeight: 'bold', textShadowColor: 'rgba(0,0,0,0.5)', textShadowRadius: 3 },
-    gameName: { color: '#E0E0E0', fontSize: 14, marginTop: 4 },
-    prizeChip: { backgroundColor: '#FFD700', alignSelf: 'flex-start', marginBottom: 8, height: 28 },
+    cardBadgeRow: { flexDirection: 'row', gap: 8, marginBottom: 8 },
+    prizeBadge: { flexDirection: 'row', alignItems: 'center', backgroundColor: 'white', paddingHorizontal: 10, paddingVertical: 4, borderRadius: 12 },
+    prizeValue: { fontSize: 13, fontWeight: '900', color: '#333', marginLeft: 4 },
+    liveBadge: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#FFEBEE', paddingHorizontal: 8, paddingVertical: 4, borderRadius: 12 },
+    pulseDot: { width: 6, height: 6, borderRadius: 3, backgroundColor: '#EF5350', marginRight: 5 },
+    liveText: { fontSize: 9, fontWeight: '900', color: '#EF5350', letterSpacing: 0.5 },
+    cardTitle: { color: 'white', fontSize: 18, fontWeight: 'bold', lineHeight: 22 },
+    cardMetaRow: { flexDirection: 'row', alignItems: 'center', marginTop: 4, gap: 6 },
+    gameNameMeta: { color: '#BDBDBD', fontSize: 12, fontWeight: '500' },
+    feeGlassBadge: { position: 'absolute', top: 10, right: 10, backgroundColor: 'rgba(255,255,255,0.15)', paddingHorizontal: 10, paddingVertical: 6, borderRadius: 12, alignItems: 'center', borderWidth: 1, borderColor: 'rgba(255,255,255,0.2)' },
+    feeLabel: { color: 'white', fontSize: 8, fontWeight: 'bold', opacity: 0.8 },
+    feeAmount: { color: 'white', fontSize: 14, fontWeight: '900', marginTop: 1 },
+    expiryBadge: { position: 'absolute', top: 10, left: 10, paddingHorizontal: 8, paddingVertical: 4, borderRadius: 8, flexDirection: 'row', alignItems: 'center' },
+    expiryText: { color: 'white', fontWeight: 'bold', fontSize: 9, marginLeft: 4 },
 
-    feeBadge: { position: 'absolute', top: 15, right: 15, backgroundColor: 'rgba(0,0,0,0.6)', paddingHorizontal: 10, paddingVertical: 5, borderRadius: 8, alignItems: 'center', borderWidth: 1, borderColor: 'rgba(255,255,255,0.3)' },
-    expiryBadge: { position: 'absolute', top: 15, left: 15, backgroundColor: '#FF9800', paddingHorizontal: 10, paddingVertical: 5, borderRadius: 8, flexDirection: 'row', alignItems: 'center', borderWidth: 1, borderColor: 'rgba(255,255,255,0.3)' },
+    cardContent: { padding: 12 },
+    statusRow: { flexDirection: 'row', marginBottom: 12 },
+    infoBadge: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#F8F9FA', paddingHorizontal: 10, paddingVertical: 6, borderRadius: 10, borderWidth: 1, borderColor: '#EDF2F7' },
+    infoText: { fontSize: 10, fontWeight: '600', color: '#4A5568', marginLeft: 4 },
+    cardDivider: { backgroundColor: '#EDF2F7' },
 
-    cardContent: { padding: 20 },
-    statusRow: { flexDirection: 'row', marginBottom: 15 },
-    statusBadge: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#F5F5F5', paddingHorizontal: 10, paddingVertical: 6, borderRadius: 20, borderWidth: 1, borderColor: '#EEEEEE' },
-    statusText: { fontSize: 11, fontWeight: '600', color: '#555', marginLeft: 6 },
-
-    accordionHeader: { backgroundColor: 'white', padding: 0, borderBottomWidth: 1, borderBottomColor: '#F0F0F0', borderRadius: 8, overflow: 'hidden' },
-    accordionContent: { padding: 15, backgroundColor: 'white', borderBottomLeftRadius: 12, borderBottomRightRadius: 12 },
-
-    statsRow: { flexDirection: 'row', backgroundColor: '#F8F9FA', padding: 15, borderRadius: 12, marginBottom: 15, borderWidth: 1, borderColor: '#E0E0E0' },
-    statBox: { flex: 1 },
-    statLabel: { fontSize: 10, color: '#757575', fontWeight: 'bold', letterSpacing: 1 },
-    statValue: { fontSize: 18, color: '#1A237E', fontWeight: 'bold', marginTop: 2 },
-    statDividerVertical: { width: 1, backgroundColor: '#E0E0E0', marginHorizontal: 15 },
+    accordionHeader: { backgroundColor: 'white', padding: 0, borderRadius: 10, overflow: 'hidden' },
+    accordionTitle: { fontSize: 13, fontWeight: '700', color: '#2D3748' },
+    accordionContent: { padding: 15, backgroundColor: 'white' },
+    internalStatsRow: { flexDirection: 'row', backgroundColor: '#F7FAFC', padding: 15, borderRadius: 16, marginBottom: 15, borderWidth: 1, borderColor: '#E2E8F0' },
+    internalStatItem: { flex: 1, alignItems: 'center' },
+    internalStatLabel: { fontSize: 9, color: '#718096', fontWeight: 'bold', letterSpacing: 1 },
+    internalStatValue: { fontSize: 18, color: '#1A237E', fontWeight: '800', marginTop: 2 },
+    verticalDivider: { width: 1, backgroundColor: '#E2E8F0', height: '100%' },
 
     detailsGrid: { flexDirection: 'row', gap: 10 },
-    detailCard: { flex: 1, flexDirection: 'row', alignItems: 'center', backgroundColor: '#FAFAFA', padding: 10, borderRadius: 8, borderWidth: 1, borderColor: '#EEEEEE' },
-    detailLabel: { fontSize: 10, color: 'gray', fontWeight: 'bold' },
-    detailValue: { fontSize: 12, color: '#333', fontWeight: '600' },
-    detailText: { color: '#555', fontSize: 13, lineHeight: 20, marginBottom: 5 },
+    detailCard: { flex: 1, flexDirection: 'row', alignItems: 'center', backgroundColor: '#F8F9FA', padding: 12, borderRadius: 12, borderWidth: 1, borderColor: '#EDF2F7' },
+    gridLabel: { fontSize: 9, color: '#A0AEC0', fontWeight: 'bold' },
+    gridValue: { fontSize: 12, color: '#2D3748', fontWeight: '700' },
+    sectionHeading: { fontSize: 11, fontWeight: 'bold', color: '#718096', marginTop: 15, marginBottom: 5, textTransform: 'uppercase' },
+    bodyText: { color: '#4A5568', fontSize: 13, lineHeight: 20 },
 
-    // Player List Styles
     playerListContainer: { marginTop: 10 },
-    playerListItem: { flexDirection: 'row', alignItems: 'center', padding: 12, backgroundColor: 'white', borderRadius: 12, marginBottom: 8, borderWidth: 1, borderColor: '#F0F0F0' },
-    paidBadge: { paddingHorizontal: 8, paddingVertical: 2, borderRadius: 6 },
+    hiddenNotice: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', padding: 20, backgroundColor: '#F8FAFC', borderRadius: 12, gap: 10 },
+    hiddenText: { fontSize: 12, color: '#718096', fontStyle: 'italic' },
+    playerCard: { flexDirection: 'row', alignItems: 'center', padding: 12, backgroundColor: 'white', borderRadius: 16, marginBottom: 10, borderWidth: 1, borderColor: '#F1F5F9' },
+    playerAvatar: { backgroundColor: '#1A237E' },
+    playerNameText: { fontSize: 14, fontWeight: 'bold', color: '#1E293B' },
+    playerSubText: { fontSize: 11, color: '#64748B' },
+    paymentStatusBadge: { paddingHorizontal: 10, paddingVertical: 4, borderRadius: 10 },
+    paymentStatusText: { fontSize: 10, fontWeight: '800' },
+    viewAllBtn: { marginTop: 5 },
+    emptyText: { textAlign: 'center', color: '#94A3B8', padding: 20, fontSize: 12 },
 
+    teamsOverView: { marginTop: 15 },
+    sectionHeaderLine: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 },
+    sectionTitleText: { fontSize: 11, fontWeight: 'bold', color: '#718096', textTransform: 'uppercase' },
+    editSetupLink: { fontSize: 12, color: '#1A237E', fontWeight: 'bold' },
+    miniTeamCard: { width: 110, alignItems: 'center', backgroundColor: 'white', padding: 12, borderRadius: 16, borderWidth: 1, borderColor: '#F1F5F9', marginRight: 12 },
+    miniTeamLogo: { width: 44, height: 44, borderRadius: 22, backgroundColor: '#F1F5F9' },
+    miniTeamName: { fontSize: 11, fontWeight: '700', color: '#334155', marginTop: 8, textAlign: 'center' },
 
-    actionRow: { flexDirection: 'row', justifyContent: 'space-between' },
+    shareSurface: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', backgroundColor: '#F8FAFC', padding: 15, borderRadius: 20, marginBottom: 15, borderWidth: 1, borderColor: '#E2E8F0' },
+    shareInfo: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+    shareLabel: { fontSize: 12, fontWeight: '700', color: '#1A237E' },
+    shareActions: { flexDirection: 'row', alignItems: 'center', gap: 12 },
+    shareIconBtn: { width: 40, height: 40, borderRadius: 20, backgroundColor: 'white', justifyContent: 'center', alignItems: 'center', elevation: 2 },
+    copyBtnMain: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#1A237E', paddingHorizontal: 15, height: 36, borderRadius: 12, gap: 6 },
+    copyBtnText: { color: 'white', fontSize: 11, fontWeight: 'bold' },
+    manageBtnMain: { borderRadius: 16, marginTop: 5, elevation: 4 },
 
     emptyContainer: { alignItems: 'center', justifyContent: 'center', paddingTop: 60 },
-
-    // Team Config Styles
-    teamsSection: { marginTop: 15, padding: 10, backgroundColor: '#f8f9fa', borderRadius: 12 },
-    teamGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10 },
-    teamStatusCard: { width: 100, alignItems: 'center', backgroundColor: 'white', padding: 10, borderRadius: 12, borderWidth: 1, borderColor: '#E0E0E0', marginRight: 10 },
-    teamMinLogo: { width: 36, height: 36, borderRadius: 18, marginBottom: 5 },
-    teamNameText: { fontSize: 11, fontWeight: 'bold', color: '#333', marginVertical: 5, textAlign: 'center' },
-    teamPlayersContainer: {
-        marginTop: 8,
-        paddingTop: 8,
-        borderTopWidth: 1,
-        borderTopColor: '#E0E0E0',
-        width: '100%',
-    },
-    playersLabel: {
-        fontSize: 10,
-        fontWeight: 'bold',
-        color: '#666',
-        marginBottom: 4,
-    },
-    playerRow: {
-        flexDirection: 'row',
-        alignItems: 'center',
-        justifyContent: 'space-between',
-        marginBottom: 3,
-    },
-    playerName: {
-        fontSize: 10,
-        color: '#333',
-        flex: 1,
-    },
-    miniPaidBadge: {
-        paddingHorizontal: 4,
-        paddingVertical: 2,
-        borderRadius: 4,
-    },
-
-    emptyState: { alignItems: 'center', paddingVertical: 50 },
-    emptyText: { color: '#999', marginTop: 10, fontSize: 14 },
-    modal: { backgroundColor: 'white', padding: 20, margin: 20, borderRadius: 20, maxWidth: 600, alignSelf: 'center', width: '90%' },
-    configItem: { flexDirection: 'row', alignItems: 'center', padding: 10, marginBottom: 10, borderRadius: 10 },
-    logoPicker: { width: 50, height: 50, borderRadius: 25, backgroundColor: '#f0f0f0', justifyContent: 'center', alignItems: 'center', overflow: 'hidden', borderWidth: 1, borderColor: '#ddd' },
+    modal: { backgroundColor: 'white', padding: 20, margin: 20, borderRadius: 24, maxWidth: 600, alignSelf: 'center', width: '90%' },
+    configItem: { flexDirection: 'row', alignItems: 'center', padding: 12, marginBottom: 12, borderRadius: 16, backgroundColor: '#F8FAFC' },
+    logoPicker: { width: 56, height: 56, borderRadius: 28, backgroundColor: '#EDF2F7', justifyContent: 'center', alignItems: 'center', overflow: 'hidden', borderWidth: 2, borderColor: 'white' },
     configuredLogo: { width: '100%', height: '100%' },
-
-    // New styles for player list
-    playerListContainer: { padding: 10, backgroundColor: 'white', borderRadius: 12, marginHorizontal: 15, marginBottom: 10, borderWidth: 1, borderColor: '#eee' },
-    playerListItem: { flexDirection: 'row', alignItems: 'center', paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: '#f5f5f5' }
 });

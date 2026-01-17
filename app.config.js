@@ -5,11 +5,11 @@ export default {
         scheme: "fpr",
         version: "1.0.0",
         orientation: "portrait",
-        icon: "./assets/icon.png",
+        icon: "./assets/logo.png",
         userInterfaceStyle: "light",
         newArchEnabled: true,
         splash: {
-            image: "./assets/icon.png",
+            image: "./assets/logo.png",
             resizeMode: "contain",
             backgroundColor: "#ffffff"
         },
@@ -18,21 +18,21 @@ export default {
         },
         android: {
             adaptiveIcon: {
-                foregroundImage: "./assets/adaptive-icon.png",
+                foregroundImage: "./assets/logo.png",
                 backgroundColor: "#ffffff"
             },
             edgeToEdgeEnabled: true,
             package: "com.forceplayerregister.app"
         },
         web: {
-            favicon: "./assets/favicon.png"
+            favicon: "./assets/logo.png"
         },
         plugins: [
             "expo-router",
             "@react-native-community/datetimepicker"
         ],
         extra: {
-            razorpayKeyId: process.env.RAZORPAY_KEY_ID || "rzp_test_RumA22x2lbG1jk", // Fallback for dev if env missing
+            razorpayKeyId: process.env.RAZORPAY_KEY_ID || "rzp_test_S45Wn70zYz9AOr", // Updated test key ID
             eas: {
                 projectId: "5ded0f01-c26b-4f72-9fb7-5e689f5fbb86"
             }

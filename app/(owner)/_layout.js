@@ -95,6 +95,13 @@ export default function OwnerLayout() {
                     tabBarItemStyle: { display: 'none' }
                 }}
             />
+            <Tabs.Screen
+                name="tournament-details/[id]"
+                options={{
+                    href: null,
+                    tabBarItemStyle: { display: 'none' }
+                }}
+            />
         </Tabs>
     );
 }

@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Welcome to Force Player Register</title>
+</head>
+
+<body
+    style="margin: 0; padding: 0; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f0f2f5;">
+    <table width="100%" cellpadding="0" cellspacing="0" style="background-color: #f0f2f5; padding: 40px 20px;">
+        <tr>
+            <td align="center">
+                <!-- Main Container -->
+                <table width="600" cellpadding="0" cellspacing="0"
+                    style="background-color: #ffffff; border-radius: 16px; overflow: hidden; box-shadow: 0 8px 30px rgba(0,0,0,0.08);">
+
+                    <!-- Header with Logo -->
+                    <tr>
+                        <td
+                            style="background: linear-gradient(135deg, #1a237e 0%, #283593 100%); padding: 40px 30px; text-align: center;">
+                            <img src="https://force-player-register-ap-ade3a.web.app/logo.png" alt="Force Sport Logo"
+                                style="width: 100px; height: auto; margin-bottom: 20px; border-radius: 12px; background: white; padding: 10px; box-shadow: 0 4px 15px rgba(0,0,0,0.2);">
+                            <h1
+                                style="color: white; margin: 0; font-size: 26px; font-weight: 700; letter-spacing: 0.5px;">
+                                Welcome to the Team!</h1>
+                            <p style="color: rgba(255,255,255,0.9); margin: 10px 0 0 0; font-size: 16px;">Organizer
+                                Dashboard Access Granted</p>
+                        </td>
+                    </tr>
+
+                    <!-- Content -->
+                    <tr>
+                        <td style="padding: 40px 30px;">
+                            <p style="color: #444; font-size: 16px; line-height: 1.6; margin: 0 0 25px 0;">
+                                Hello <strong>{{ORGANIZER_NAME}}</strong>,
+                            </p>
+                            <p style="color: #444; font-size: 16px; line-height: 1.6; margin: 0 0 30px 0;">
+                                Your official organizer account has been created for <strong>Force Player
+                                    Register</strong>. You now have full control to manage tournaments, track players,
+                                and oversee payments.
+                            </p>
+
+                            <!-- Credentials Box -->
+                            <div
+                                style="background-color: #f8f9fa; border: 1px solid #e9ecef; border-radius: 12px; padding: 25px; margin-bottom: 30px; position: relative; overflow: hidden;">
+                                <div
+                                    style="position: absolute; top: 0; left: 0; width: 4px; height: 100%; background: #1a237e;">
+                                </div>
+                                <h3
+                                    style="color: #1a237e; margin: 0 0 20px 0; font-size: 16px; text-transform: uppercase; letter-spacing: 1px;">
+                                    🔑 Login Credentials</h3>
+
+                                <div style="margin-bottom: 15px;">
+                                    <span
+                                        style="display: block; color: #6c757d; font-size: 12px; font-weight: 600; text-transform: uppercase;">Email</span>
+                                    <span
+                                        style="font-family: 'Courier New', monospace; font-size: 16px; color: #333; font-weight: 600;">{{ORGANIZER_EMAIL}}</span>
+                                </div>
+
+                                <div>
+                                    <span
+                                        style="display: block; color: #6c757d; font-size: 12px; font-weight: 600; text-transform: uppercase;">Password</span>
+                                    <span
+                                        style="font-family: 'Courier New', monospace; font-size: 16px; color: #333; font-weight: 600;">{{ORGANIZER_PASSWORD}}</span>
+                                </div>
+                            </div>
+
+                            <!-- Registration Details -->
+                            <div
+                                style="margin-bottom: 30px; border: 1px solid #e9ecef; border-radius: 12px; padding: 25px;">
+                                <h3
+                                    style="color: #1a237e; margin: 0 0 20px 0; font-size: 16px; text-transform: uppercase; letter-spacing: 1px;">
+                                    📋 Verified Details</h3>
+                                <table width="100%" cellpadding="0" cellspacing="0">
+                                    <tr>
+                                        <td style="padding-bottom: 10px; color: #666; font-size: 14px; width: 100px;">
+                                            Name</td>
+                                        <td
+                                            style="padding-bottom: 10px; color: #333; font-size: 14px; font-weight: 600;">
+                                            {{ORGANIZER_NAME}}</td>
+                                    </tr>
+                                    <tr>
+                                        <td style="padding-bottom: 10px; color: #666; font-size: 14px;">Phone</td>
+                                        <td
+                                            style="padding-bottom: 10px; color: #333; font-size: 14px; font-weight: 600;">
+                                            {{ORGANIZER_PHONE}}</td>
+                                    </tr>
+                                    <tr>
+                                        <td style="color: #666; font-size: 14px;">Address</td>
+                                        <td style="color: #333; font-size: 14px; font-weight: 600;">
+                                            {{ORGANIZER_ADDRESS}}</td>
+                                    </tr>
+                                </table>
+                            </div>
+
+                            <!-- Action Button -->
+                            <div style="text-align: center; margin: 40px 0;">
+                                <a href="https://force-player-register-ap-ade3a.web.app"
+                                    style="background: #1a237e; color: white; text-decoration: none; padding: 18px 40px; border-radius: 50px; font-size: 16px; font-weight: 700; box-shadow: 0 4px 15px rgba(26, 35, 126, 0.3); display: inline-block;">Login
+                                    to Dashboard</a>
+                            </div>
+
+                            <!-- Security Note -->
+                            <div
+                                style="background-color: #fff3e0; border-radius: 8px; padding: 15px; text-align: center;">
+                                <p style="color: #e65100; font-size: 13px; margin: 0;"><strong>🔒 Security
+                                        Alert:</strong> For your safety, please change your password immediately after
+                                    your first login.</p>
+                            </div>
+                        </td>
+                    </tr>
+
+                    <!-- Footer -->
+                    <tr>
+                        <td
+                            style="background-color: #f8f9fa; padding: 30px; text-align: center; border-top: 1px solid #e9ecef;">
+                            <img src="https://force-player-register-ap-ade3a.web.app/logo.png" alt="Force Sport"
+                                style="width: 40px; height: auto; opacity: 0.5; margin-bottom: 15px;">
+                            <p style="color: #6c757d; font-size: 14px; margin: 0 0 10px 0; font-weight: 700;">Force
+                                Player Register</p>
+                            <p style="color: #adb5bd; font-size: 12px; margin: 0;">
+                                Tournament Management System<br>
+                                &copy; 2026 Force Sport. All rights reserved.
+                            </p>
+                        </td>
+                    </tr>
+                </table>
+            </td>
+        </tr>
+    </table>
+</body>
+
+</html>

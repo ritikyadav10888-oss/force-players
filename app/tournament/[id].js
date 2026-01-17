@@ -11,6 +11,7 @@ import { useAuth } from '../../src/context/AuthContext';
 import { LinearGradient } from 'expo-linear-gradient';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { useNetworkStatus } from '../../src/hooks/useNetworkStatus';
 
 import { RazorpayService } from '../../src/services/RazorpayService';
 import DateTimePicker from '@react-native-community/datetimepicker';
@@ -309,6 +310,9 @@ export default function TournamentRegistrationScreen() {
     const [errorMessage, setErrorMessage] = useState('');
     const [visibleTeamMenu, setVisibleTeamMenu] = useState(false);
 
+    // Network status
+    const { isOnline } = useNetworkStatus();
+
     useEffect(() => {
         if (id) fetchTournament();
         loadDraft();
@@ -326,9 +330,30 @@ export default function TournamentRegistrationScreen() {
             const localEnrolled = await AsyncStorage.getItem(`enrolled_${id}`);
             if (localEnrolled) {
                 const data = JSON.parse(localEnrolled);
-                // Verify with Firestore briefly if possible or just trust local memory for UX
-                setExistingRegistration({ registrationNumber: data.registrationId });
-                setIsAlreadyRegistered(true);
+
+                // Fetch actual registration from Firestore to get current payment status
+                try {
+                    const playersQuery = query(
+                        collection(db, 'tournaments', id, 'players'),
+                        where('email', '==', data.email)
+                    );
+                    const playersSnap = await getDocs(playersQuery);
+
+                    if (!playersSnap.empty) {
+                        const regDoc = playersSnap.docs[0];
+                        const regData = { ...regDoc.data(), docId: regDoc.id };
+                        setExistingRegistration(regData);
+                        setIsAlreadyRegistered(true);
+                    } else {
+                        // Registration not found in Firestore, clear local storage
+                        await AsyncStorage.removeItem(`enrolled_${id}`);
+                    }
+                } catch (firestoreError) {
+                    console.log('Error fetching registration from Firestore:', firestoreError);
+                    // Fallback to local data without paid status
+                    setExistingRegistration({ registrationNumber: data.registrationId });
+                    setIsAlreadyRegistered(true);
+                }
             }
 
             const draft = await AsyncStorage.getItem(`draft_${id}`);
@@ -452,7 +477,8 @@ export default function TournamentRegistrationScreen() {
             );
             const emailSnap = await getDocs(emailQuery);
 
-            let regData = !emailSnap.empty ? emailSnap.docs[0].data() : null;
+            let regDoc = !emailSnap.empty ? emailSnap.docs[0] : null;
+            let regData = regDoc ? { ...regDoc.data(), docId: regDoc.id } : null;
 
             // 2. Check by Phone if not found by email
             if (!regData && formData.phone) {
@@ -461,15 +487,19 @@ export default function TournamentRegistrationScreen() {
                     where('phone', '==', formData.phone.trim())
                 );
                 const phoneSnap = await getDocs(phoneQuery);
-                if (!phoneSnap.empty) regData = phoneSnap.docs[0].data();
+                if (!phoneSnap.empty) {
+                    regDoc = phoneSnap.docs[0];
+                    regData = { ...regDoc.data(), docId: regDoc.id };
+                }
             }
 
             if (regData) {
-                // Only block if payment is already completed
-                if (regData.paid === true) {
-                    setExistingRegistration(regData);
-                    setIsAlreadyRegistered(true);
+                // Show registration status regardless of payment
+                setExistingRegistration(regData);
+                setIsAlreadyRegistered(true);
 
+                if (regData.paid === true) {
+                    // Block if already paid
                     Alert.alert(
                         "Already Registered",
                         `You are already registered for this tournament.\n\n` +
@@ -481,14 +511,24 @@ export default function TournamentRegistrationScreen() {
                     );
                     return;
                 } else {
-                    // Payment is pending - allow re-registration or payment completion
-                    console.log('Existing registration found but payment pending. Allowing re-registration.');
+                    // Payment is pending - allow to proceed to payment
                     Alert.alert(
-                        "Pending Payment",
-                        `You have a pending registration. You can complete the payment now or register again.\n\n` +
-                        `Previous Registration ID: ${regData.registrationNumber}`,
-                        [{ text: "Continue", onPress: () => { } }]
+                        "Pending Registration Found",
+                        `You have a pending registration for this tournament.\n\n` +
+                        `Registration ID: ${regData.registrationNumber}\n` +
+                        `Status: Payment Pending\n\n` +
+                        `You can proceed to complete the payment now.`,
+                        [
+                            { text: "Cancel", style: "cancel" },
+                            {
+                                text: "Complete Payment", onPress: () => {
+                                    // Allow user to proceed - they can complete payment
+                                    setIsAlreadyRegistered(false); // Temporarily allow form access
+                                }
+                            }
+                        ]
                     );
+                    return;
                 }
             }
 
@@ -531,8 +571,9 @@ export default function TournamentRegistrationScreen() {
 
     const validateStep = () => {
         setFormErrors({}); // Reset errors
-        if (isAlreadyRegistered) {
-            Alert.alert("Action Blocked", "You are already registered for this tournament.");
+        // Only block if registration is already paid
+        if (isAlreadyRegistered && existingRegistration?.paid === true) {
+            Alert.alert("Action Blocked", "You are already registered for this tournament with payment completed.");
             return false;
         }
         if (step === 0) return true;
@@ -649,15 +690,137 @@ export default function TournamentRegistrationScreen() {
 
     const prevStep = () => setStep(step - 1);
 
+    // Payment Recovery Functions
+    const savePendingPayment = async (paymentData) => {
+        try {
+            await AsyncStorage.setItem(`pending_payment_${id}`, JSON.stringify({
+                tournamentId: id,
+                registrationId: paymentData.registrationId,
+                amount: tournament.entryFee,
+                timestamp: Date.now(),
+                playerEmail: formData.email,
+                playerPhone: formData.phone
+            }));
+        } catch (error) {
+            console.error('Error saving pending payment:', error);
+        }
+    };
+
+    const clearPendingPayment = async () => {
+        try {
+            await AsyncStorage.removeItem(`pending_payment_${id}`);
+        } catch (error) {
+            console.error('Error clearing pending payment:', error);
+        }
+    };
+
+    const checkPendingPayments = async () => {
+        try {
+            const pendingPayment = await AsyncStorage.getItem(`pending_payment_${id}`);
+            if (!pendingPayment) return;
+
+            const paymentData = JSON.parse(pendingPayment);
+
+            // Check if payment was completed (query Firestore)
+            if (paymentData.registrationId && paymentData.registrationId !== 'new') {
+                const playerDoc = await getDoc(doc(db, 'tournaments', id, 'players', paymentData.registrationId));
+
+                if (playerDoc.exists()) {
+                    const data = playerDoc.data();
+
+                    if (data.paid === true) {
+                        // Payment was successful!
+                        await clearPendingPayment();
+                        setExistingRegistration(data);
+                        setRegistrationId(data.registrationNumber);
+                        Alert.alert(
+                            "Payment Confirmed!",
+                            `Your payment was successfully processed.\n\nRegistration ID: ${data.registrationNumber}`
+                        );
+                    } else {
+                        // Payment still pending - offer to retry
+                        Alert.alert(
+                            "Pending Payment Found",
+                            "We found an incomplete payment. Would you like to verify the status or retry?",
+                            [
+                                { text: "Cancel", style: "cancel" },
+                                {
+                                    text: "Verify Status",
+                                    onPress: () => verifyPaymentStatus(paymentData)
+                                },
+                                {
+                                    text: "Retry Payment",
+                                    onPress: () => {
+                                        clearPendingPayment();
+                                        setStep(3); // Go to payment step
+                                    }
+                                }
+                            ]
+                        );
+                    }
+                }
+            }
+        } catch (error) {
+            console.error('Error checking pending payments:', error);
+        }
+    };
+
+    const verifyPaymentStatus = async (paymentData) => {
+        setLoading(true);
+        try {
+            const playerDoc = await getDoc(doc(db, 'tournaments', id, 'players', paymentData.registrationId));
+
+            if (playerDoc.exists() && playerDoc.data().paid === true) {
+                await clearPendingPayment();
+                Alert.alert("Success", "Payment confirmed! Your registration is complete.");
+                setExistingRegistration(playerDoc.data());
+                setRegistrationId(playerDoc.data().registrationNumber);
+            } else {
+                Alert.alert(
+                    "Payment Pending",
+                    "Payment is still being processed. This may take a few minutes. Please check back shortly or contact support."
+                );
+            }
+        } catch (error) {
+            Alert.alert("Error", "Unable to verify payment status. Please check your internet connection.");
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    // Check pending payments when online
+    useEffect(() => {
+        if (isOnline && id) {
+            checkPendingPayments();
+        }
+    }, [isOnline, id]);
+
     const confirmPayment = async () => {
-        if (isAlreadyRegistered) {
-            Alert.alert("Error", "You are already registered for this tournament.");
+        // Check internet connection before payment
+        if (!isOnline) {
+            Alert.alert(
+                "No Internet Connection",
+                "Payment processing requires an active internet connection. Please check your connection and try again."
+            );
+            return;
+        }
+
+        // Only block if registration is already paid
+        if (isAlreadyRegistered && existingRegistration?.paid === true) {
+            Alert.alert("Error", "You are already registered for this tournament with payment completed.");
             return;
         }
         setPaymentModalVisible(true);
         setPaymentProcessing(true);
         setPaymentStatus('pending');
         setErrorMessage('');
+
+        // Save pending payment before creating registration
+        await savePendingPayment({
+            registrationId: 'new',
+            playerEmail: formData.email,
+            playerPhone: formData.phone
+        });
 
         try {
             // Final check just in case (Email & Phone)
@@ -666,17 +829,78 @@ export default function TournamentRegistrationScreen() {
             const phoneQ = query(playerCol, where('phone', '==', formData.phone.trim()));
 
             const [eSnap, pSnap] = await Promise.all([getDocs(emailQ), getDocs(phoneQ)]);
-            const existing = !eSnap.empty ? eSnap.docs[0].data() : (!pSnap.empty ? pSnap.docs[0].data() : null);
+            const existing = !eSnap.empty ? eSnap.docs[0] : (!pSnap.empty ? pSnap.docs[0] : null);
 
-            if (existing) {
-                // Only block if payment is already completed
-                if (existing.paid === true) {
-                    setExistingRegistration(existing);
+            let existingData = existing ? existing.data() : null;
+            let existingDocId = existing ? existing.id : null;
+
+            if (existingData) {
+                // Block if payment is already completed
+                if (existingData.paid === true) {
+                    setExistingRegistration(existingData);
                     setIsAlreadyRegistered(true);
-                    throw new Error(`You are already registered (ID: ${existing.registrationNumber}). Please contact the organizer.`);
+                    throw new Error(`You are already registered (ID: ${existingData.registrationNumber}). Payment completed. Please contact the organizer if you have questions.`);
                 } else {
-                    // Payment pending - allow to proceed with new registration/payment
-                    console.log('Existing registration with pending payment found. Allowing new registration.');
+                    // Payment is pending - allow retry payment with existing registration
+                    console.log('Pending registration found. Allowing payment retry with existing registration:', existingData.registrationNumber);
+
+                    // Set the registration ID so user can see it
+                    setRegistrationId(existingData.registrationNumber);
+
+                    // Save pending payment for recovery
+                    await savePendingPayment({
+                        registrationId: existingDocId
+                    });
+
+                    // Skip to payment step using existing registration
+                    const paymentId = await RazorpayService.openCheckout({
+                        amount: tournament.entryFee,
+                        name: tournament.name,
+                        description: `Registration for ${tournament.gameName}`,
+                        notes: {
+                            tournamentId: id,
+                            playerId: existingDocId // Use existing document ID
+                        },
+                        prefill: {
+                            name: existingData.playerName || formData.name,
+                            email: existingData.email || formData.email,
+                            contact: existingData.phone || formData.phone
+                        },
+                        theme: { color: '#1a237e' }
+                    });
+
+                    if (!paymentId) throw new Error("Payment failed or was cancelled.");
+
+                    // Development Mode: Update status for localhost testing
+                    const isLocalhost = Platform.OS === 'web' &&
+                        (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1');
+
+                    if (isLocalhost) {
+                        console.log('🔧 Development Mode: Updating payment status for retry (localhost)');
+                        const existingDocRef = doc(db, 'tournaments', id, 'players', existingDocId);
+                        await updateDoc(existingDocRef, {
+                            paid: true,
+                            paymentId: paymentId,
+                            paidAmount: tournament.entryFee,
+                            paidAt: new Date().toISOString(),
+                            status: 'approved'
+                        });
+                        console.log('✅ Payment status updated for existing registration (localhost only)');
+                    }
+
+                    // Payment successful - webhook will update the status in production
+                    setPaymentStatus('success');
+
+                    // Clear pending payment on success
+                    await clearPendingPayment();
+
+                    setTimeout(() => {
+                        setPaymentModalVisible(false);
+                        setPosterVisible(true);
+                    }, 1000);
+
+                    setPaymentProcessing(false);
+                    return; // Exit early, don't create new registration
                 }
             }
 
@@ -695,11 +919,11 @@ export default function TournamentRegistrationScreen() {
 
                     if (!meSnap.empty || !mpSnap.empty) {
                         const mData = !meSnap.empty ? meSnap.docs[0].data() : mpSnap.docs[0].data();
-                        // Only block if team member has already paid
+                        // Block ANY existing registration for team members
                         if (mData.paid === true) {
-                            throw new Error(`Team member ${member.name} is already registered (ID: ${mData.registrationNumber}).`);
+                            throw new Error(`Team member ${member.name} is already registered (ID: ${mData.registrationNumber}). Payment completed.`);
                         } else {
-                            console.log(`Team member ${member.name} has pending payment. Allowing re-registration.`);
+                            throw new Error(`Team member ${member.name} already has a pending registration (ID: ${mData.registrationNumber}). Please complete that payment first.`);
                         }
                     }
                 }
@@ -787,6 +1011,158 @@ export default function TournamentRegistrationScreen() {
             const docRef = await addDoc(collection(db, 'tournaments', id, 'players'), registrationDoc);
             console.log("Registration initialised:", docRef.id);
 
+            // Set registration ID immediately so user can see it
+            setRegistrationId(uniqueNum);
+
+            // Save enrollment record for device memory
+            await AsyncStorage.setItem(`enrolled_${id}`, JSON.stringify({
+                registrationId: uniqueNum,
+                tournamentId: id,
+                email: formData.email
+            }));
+
+            console.log("🔍 DEBUG: About to send registration email...");
+            // Send Registration Confirmation Email
+            try {
+                const emailData = {
+                    to: formData.email,
+                    message: {
+                        subject: `Registration Confirmed - ${tournament.name}`,
+                        html: `
+                            <!DOCTYPE html>
+                            <html>
+                            <head>
+                                <meta charset="UTF-8">
+                                <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                            </head>
+                            <body style="margin: 0; padding: 0; font-family: 'Segoe UI', Arial, sans-serif; background-color: #f5f5f5;">
+                                <table width="100%" cellpadding="0" cellspacing="0" style="background-color: #f5f5f5; padding: 40px 20px;">
+                                    <tr>
+                                        <td align="center">
+                                            <table width="600" cellpadding="0" cellspacing="0" style="background-color: #ffffff; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 12px rgba(0,0,0,0.1);">
+                                                <!-- Header -->
+                                                <tr>
+                                                    <td style="background: linear-gradient(135deg, #1a237e 0%, #3949ab 100%); padding: 40px 30px; text-align: center;">
+                                                        <div style="width: 80px; height: 80px; background-color: white; border-radius: 50%; margin: 0 auto 20px; display: inline-flex; align-items: center; justify-content: center;">
+                                                            <span style="font-size: 40px;">🎮</span>
+                                                        </div>
+                                                        <h1 style="color: white; margin: 0; font-size: 28px; font-weight: 600;">Registration Confirmed!</h1>
+                                                        <p style="color: rgba(255,255,255,0.9); margin: 10px 0 0 0; font-size: 16px;">Welcome to ${tournament.name}</p>
+                                                    </td>
+                                                </tr>
+                                                <!-- Content -->
+                                                <tr>
+                                                    <td style="padding: 40px 30px;">
+                                                        <p style="color: #333; font-size: 16px; line-height: 1.6; margin: 0 0 20px 0;">
+                                                            Hello <strong>${formData.name}</strong>,
+                                                        </p>
+                                                        <p style="color: #333; font-size: 16px; line-height: 1.6; margin: 0 0 30px 0;">
+                                                            Thank you for registering for <strong>${tournament.name}</strong>! Your registration has been received.
+                                                        </p>
+                                                        <!-- Registration Details Box -->
+                                                        <div style="background: linear-gradient(135deg, #f5f7fa 0%, #e8ecf1 100%); border-radius: 12px; padding: 25px; margin: 30px 0; border: 2px solid #1a237e;">
+                                                            <h3 style="color: #1a237e; margin: 0 0 20px 0; font-size: 18px; text-align: center;">📋 Registration Details</h3>
+                                                            <table width="100%" cellpadding="10" cellspacing="0">
+                                                                <tr>
+                                                                    <td style="color: #666; font-size: 14px; font-weight: 600; width: 50%;">Registration ID:</td>
+                                                                    <td style="color: #333; font-size: 14px; font-family: 'Courier New', monospace; text-align: right;">${uniqueNum}</td>
+                                                                </tr>
+                                                                <tr>
+                                                                    <td style="color: #666; font-size: 14px; font-weight: 600;">Player Name:</td>
+                                                                    <td style="color: #333; font-size: 14px; text-align: right;">${formData.name}</td>
+                                                                </tr>
+                                                                <tr>
+                                                                    <td style="color: #666; font-size: 14px; font-weight: 600;">Email:</td>
+                                                                    <td style="color: #333; font-size: 14px; text-align: right;">${formData.email}</td>
+                                                                </tr>
+                                                                <tr>
+                                                                    <td style="color: #666; font-size: 14px; font-weight: 600;">Phone:</td>
+                                                                    <td style="color: #333; font-size: 14px; text-align: right;">${formData.phone}</td>
+                                                                </tr>
+                                                                ${formData.teamName ? `
+                                                                <tr>
+                                                                    <td style="color: #666; font-size: 14px; font-weight: 600;">Team:</td>
+                                                                    <td style="color: #333; font-size: 14px; text-align: right;">${formData.teamName}</td>
+                                                                </tr>
+                                                                ` : ''}
+                                                                <tr style="border-top: 2px solid #e0e0e0;">
+                                                                    <td style="color: #1a237e; font-size: 16px; font-weight: 700; padding-top: 15px;">Entry Fee:</td>
+                                                                    <td style="color: #1a237e; font-size: 18px; font-weight: 700; text-align: right; padding-top: 15px;">₹${payableAmount}</td>
+                                                                </tr>
+                                                            </table>
+                                                        </div>
+                                                        <!-- Payment Status -->
+                                                        <div style="background-color: #fff3e0; border-left: 4px solid #ff9800; padding: 15px; margin: 20px 0; border-radius: 4px;">
+                                                            <p style="color: #e65100; font-size: 14px; margin: 0; line-height: 1.6;">
+                                                                <strong>⏳ Payment Pending:</strong><br>
+                                                                Please complete your payment to confirm your spot. You will receive a payment confirmation email once the payment is successful.
+                                                            </p>
+                                                        </div>
+                                                        <!-- Tournament Info -->
+                                                        <h3 style="color: #1a237e; margin: 30px 0 15px 0; font-size: 18px;">🎮 Tournament Information</h3>
+                                                        <table width="100%" cellpadding="8" cellspacing="0" style="background-color: #f9f9f9; border-radius: 8px;">
+                                                            <tr>
+                                                                <td style="color: #666; font-size: 14px; padding: 10px;">📋 Tournament:</td>
+                                                                <td style="color: #333; font-size: 14px; font-weight: 600; padding: 10px;">${tournament.name}</td>
+                                                            </tr>
+                                                            <tr>
+                                                                <td style="color: #666; font-size: 14px; padding: 10px;">🎮 Game:</td>
+                                                                <td style="color: #333; font-size: 14px; font-weight: 600; padding: 10px;">${tournament.gameName}</td>
+                                                            </tr>
+                                                            <tr>
+                                                                <td style="color: #666; font-size: 14px; padding: 10px;">📅 Date:</td>
+                                                                <td style="color: #333; font-size: 14px; font-weight: 600; padding: 10px;">${tournament.startDate || 'TBA'}</td>
+                                                            </tr>
+                                                            <tr>
+                                                                <td style="color: #666; font-size: 14px; padding: 10px;">📍 Venue:</td>
+                                                                <td style="color: #333; font-size: 14px; font-weight: 600; padding: 10px;">${tournament.venue || 'TBA'}</td>
+                                                            </tr>
+                                                        </table>
+                                                        <p style="color: #666; font-size: 13px; line-height: 1.6; margin: 20px 0 0 0; text-align: center; font-style: italic;">
+                                                            Keep this email for your records. Your registration ID is: <strong>${uniqueNum}</strong>
+                                                        </p>
+                                                        <p style="color: #333; font-size: 16px; line-height: 1.6; margin: 30px 0 10px 0;">
+                                                            See you at the tournament!
+                                                        </p>
+                                                        <p style="color: #333; font-size: 16px; line-height: 1.6; margin: 0;">
+                                                            <strong>Force Player Register Team</strong>
+                                                        </p>
+                                                    </td>
+                                                </tr>
+                                                <!-- Footer -->
+                                                <tr>
+                                                    <td style="background-color: #f8f9fa; padding: 30px; text-align: center; border-top: 1px solid #e0e0e0;">
+                                                        <p style="color: #666; font-size: 14px; margin: 0 0 10px 0; font-weight: 600;">Force Player Register</p>
+                                                        <p style="color: #999; font-size: 12px; margin: 0 0 15px 0;">Tournament Management System</p>
+                                                        <p style="color: #999; font-size: 11px; margin: 0; line-height: 1.5;">© 2026 Force Player Register. All rights reserved.</p>
+                                                    </td>
+                                                </tr>
+                                            </table>
+                                        </td>
+                                    </tr>
+                                </table>
+                            </body>
+                            </html>
+                        `
+                    }
+                };
+
+                console.log("📧 Attempting to queue registration email...");
+                console.log("Email will be sent to:", formData.email);
+                console.log("Tournament name:", tournament.name);
+
+                // Queue email via Firebase Extension
+                const mailRef = await addDoc(collection(db, 'mail'), emailData);
+                console.log("✅ Registration confirmation email queued successfully!");
+                console.log("Mail document ID:", mailRef.id);
+                console.log("Email queued for:", formData.email);
+            } catch (emailError) {
+                console.error("❌ Failed to queue registration email:", emailError);
+                console.error("Error details:", emailError.message);
+                console.error("Error code:", emailError.code);
+                // Don't block registration if email fails
+            }
+
             // 5. Handle Payment
             if (payableAmount > 0) {
                 const paymentId = await RazorpayService.openCheckout({
@@ -807,17 +1183,27 @@ export default function TournamentRegistrationScreen() {
 
                 if (!paymentId) throw new Error("Payment failed or was cancelled.");
 
-                // 6. Instant Confirmation (Client-side)
-                // Since we don't have a live Webhook server, we update the status directly upon success.
-                await updateDoc(docRef, {
-                    paid: true,
-                    status: 'approved',
-                    paymentId: paymentId,
-                    paymentDate: new Date().toISOString()
-                });
+                // 6. Development Mode: Update status client-side for localhost testing
+                // In production, the webhook will handle this securely
+                const isLocalhost = Platform.OS === 'web' &&
+                    (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1');
+
+                if (isLocalhost) {
+                    console.log('🔧 Development Mode: Updating payment status client-side for testing');
+                    await updateDoc(docRef, {
+                        paid: true,
+                        paymentId: paymentId,
+                        paidAmount: payableAmount,
+                        paidAt: new Date().toISOString(),
+                        status: 'approved'
+                    });
+                    console.log('✅ Payment status updated (localhost only)');
+                } else {
+                    // Production: Webhook will update the status
+                    console.log('🔒 Production Mode: Webhook will update payment status');
+                }
             } else {
-                // Free Entry - Update to paid manually (only if allowed by rules, usually through an admin/authorized call)
-                // For simplicity, we'll try to update it but this might need a secure bypass
+                // Free Entry - Update to paid directly (if rule allows, or consider moving to a function)
                 await updateDoc(docRef, { paid: true, status: 'approved' });
             }
 
@@ -835,15 +1221,13 @@ export default function TournamentRegistrationScreen() {
             }, { merge: true });
 
             await AsyncStorage.removeItem(`draft_${id}`);
-            // Save enrollment record for device memory
-            await AsyncStorage.setItem(`enrolled_${id}`, JSON.stringify({
-                registrationId: uniqueNum,
-                tournamentId: id,
-                email: formData.email
-            }));
 
-            setRegistrationId(uniqueNum);
+            // Registration ID already set above,
+            // Payment successful
             setPaymentStatus('success');
+
+            // Clear pending payment on success
+            await clearPendingPayment();
 
             setTimeout(() => {
                 setPaymentModalVisible(false);
@@ -913,7 +1297,8 @@ export default function TournamentRegistrationScreen() {
         );
     }
 
-    if (registrationId) return (
+    // Only show success screen if payment is completed
+    if (registrationId && paymentStatus === 'success') return (
         <LinearGradient colors={['#1a237e', '#4527a0']} style={styles.center}>
             <Surface style={styles.successCard} elevation={5}>
                 <Avatar.Icon size={80} icon="check-all" style={{ backgroundColor: '#4CAF50' }} />
@@ -952,18 +1337,65 @@ export default function TournamentRegistrationScreen() {
 
                     {/* Already Registered Warning */}
                     {isAlreadyRegistered && (
-                        <Surface style={{ margin: 15, padding: 20, borderRadius: 12, backgroundColor: '#FFF3E0', borderWidth: 1, borderColor: '#FFE0B2' }} elevation={2}>
+                        <Surface style={{
+                            margin: 15,
+                            padding: 20,
+                            borderRadius: 12,
+                            backgroundColor: existingRegistration?.paid ? '#E8F5E9' : '#FFF3E0',
+                            borderWidth: 1,
+                            borderColor: existingRegistration?.paid ? '#C8E6C9' : '#FFE0B2'
+                        }} elevation={2}>
                             <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 10 }}>
-                                <MaterialCommunityIcons name="alert-decagram" size={24} color="#E65100" />
-                                <Title style={{ marginLeft: 10, color: '#E65100', fontSize: 18 }}>Already Registered</Title>
+                                <MaterialCommunityIcons
+                                    name={existingRegistration?.paid ? "check-circle" : "clock-alert-outline"}
+                                    size={24}
+                                    color={existingRegistration?.paid ? "#2E7D32" : "#E65100"}
+                                />
+                                <Title style={{
+                                    marginLeft: 10,
+                                    color: existingRegistration?.paid ? "#2E7D32" : "#E65100",
+                                    fontSize: 18
+                                }}>
+                                    {existingRegistration?.paid ? "Already Registered" : "Registration Pending"}
+                                </Title>
                             </View>
                             <Text style={{ fontSize: 14, color: '#5D4037', marginBottom: 15, lineHeight: 20 }}>
-                                Our records show you are already enrolled in this tournament. Please find your registration details below.
+                                {existingRegistration?.paid
+                                    ? "Our records show you are already enrolled in this tournament. Please find your registration details below."
+                                    : "Your registration is pending payment. Please complete the payment to confirm your spot."}
                             </Text>
-                            <View style={{ backgroundColor: 'white', padding: 15, borderRadius: 8, borderLeftWidth: 4, borderLeftColor: '#E65100' }}>
+                            <View style={{
+                                backgroundColor: 'white',
+                                padding: 15,
+                                borderRadius: 8,
+                                borderLeftWidth: 4,
+                                borderLeftColor: existingRegistration?.paid ? "#2E7D32" : "#E65100"
+                            }}>
                                 <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 8 }}>
                                     <Text style={{ fontWeight: 'bold' }}>Reg ID:</Text>
-                                    <Text style={{ color: '#E65100', fontWeight: 'bold' }}>{existingRegistration?.registrationNumber}</Text>
+                                    <Text style={{
+                                        color: existingRegistration?.paid ? "#2E7D32" : "#E65100",
+                                        fontWeight: 'bold'
+                                    }}>
+                                        {existingRegistration?.registrationNumber}
+                                    </Text>
+                                </View>
+                                <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 8 }}>
+                                    <Text style={{ fontWeight: 'bold' }}>Status:</Text>
+                                    <Chip
+                                        mode="flat"
+                                        style={{
+                                            backgroundColor: existingRegistration?.paid ? "#C8E6C9" : "#FFE0B2",
+                                            height: 24
+                                        }}
+                                        textStyle={{
+                                            fontSize: 12,
+                                            fontWeight: 'bold',
+                                            color: existingRegistration?.paid ? "#2E7D32" : "#E65100"
+                                        }}
+                                    >
+                                        {existingRegistration?.paid ? "PAID" : "PENDING"}
+                                    </Chip>
                                 </View>
                                 <Divider style={{ marginVertical: 8 }} />
                                 <Text style={{ fontSize: 12, fontWeight: 'bold', color: 'gray', marginBottom: 4 }}>ORGANIZER CONTACT</Text>
@@ -973,6 +1405,74 @@ export default function TournamentRegistrationScreen() {
                                     <Text style={{ marginLeft: 5, color: theme.colors.primary, fontWeight: 'bold' }}>{organizerInfo?.phone || 'N/A'}</Text>
                                 </TouchableOpacity>
                             </View>
+
+                            {/* Complete Payment Button for Pending Registrations */}
+                            {!existingRegistration?.paid && (
+                                <Button
+                                    mode="contained"
+                                    style={{ marginTop: 15, borderRadius: 8 }}
+                                    buttonColor="#E65100"
+                                    onPress={async () => {
+                                        try {
+                                            setPaymentModalVisible(true);
+                                            setPaymentProcessing(true);
+                                            setPaymentStatus('pending');
+
+                                            // Open payment gateway with existing registration
+                                            const paymentId = await RazorpayService.openCheckout({
+                                                amount: tournament.entryFee,
+                                                name: tournament.name,
+                                                description: `Registration for ${tournament.gameName}`,
+                                                notes: {
+                                                    tournamentId: id,
+                                                    playerId: existingRegistration.docId || existingRegistration.id
+                                                },
+                                                prefill: {
+                                                    name: existingRegistration.playerName,
+                                                    email: existingRegistration.email,
+                                                    contact: existingRegistration.phone
+                                                },
+                                                theme: { color: '#1a237e' }
+                                            });
+
+                                            if (!paymentId) throw new Error("Payment cancelled");
+
+                                            // Development Mode: Update status for localhost testing
+                                            const isLocalhost = Platform.OS === 'web' &&
+                                                (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1');
+
+                                            if (isLocalhost) {
+                                                console.log('🔧 Development Mode: Updating payment status from banner (localhost)');
+                                                const existingDocRef = doc(db, 'tournaments', id, 'players', existingRegistration.docId);
+                                                await updateDoc(existingDocRef, {
+                                                    paid: true,
+                                                    paymentId: paymentId,
+                                                    paidAmount: tournament.entryFee,
+                                                    paidAt: new Date().toISOString(),
+                                                    status: 'approved'
+                                                });
+                                                console.log('✅ Payment status updated from banner (localhost only)');
+                                            }
+
+                                            setPaymentStatus('success');
+                                            setRegistrationId(existingRegistration.registrationNumber);
+
+                                            setTimeout(() => {
+                                                setPaymentModalVisible(false);
+                                                setPosterVisible(true);
+                                            }, 1000);
+                                        } catch (error) {
+                                            console.error("Payment error:", error);
+                                            setPaymentStatus('failed');
+                                            Alert.alert("Payment Error", error.message || "Payment failed. Please try again.");
+                                        } finally {
+                                            setPaymentProcessing(false);
+                                        }
+                                    }}
+                                >
+                                    Complete Payment Now
+                                </Button>
+                            )}
 
                         </Surface>
                     )}
@@ -1176,7 +1676,11 @@ export default function TournamentRegistrationScreen() {
                                                 style={{ marginRight: 10 }}
                                             />
                                             <Text style={{ fontSize: 13, flex: 1, color: agreedToTerms ? '#0D47A1' : '#546E7A', lineHeight: 18, fontWeight: agreedToTerms ? '600' : '400' }}>
-                                                I have read and agree to all the rules, terms, and conditions of {tournament.name}.
+                                                I have read and agree to all the rules, terms, and conditions of {tournament.name}. I also acknowledge that I have read the official
+                                                <Text onPress={() => router.push('/policies/terms')} style={{ color: '#1A237E', fontWeight: 'bold', textDecorationLine: 'underline' }}> Terms & Conditions</Text>,
+                                                <Text onPress={() => router.push('/policies/privacy')} style={{ color: '#1A237E', fontWeight: 'bold', textDecorationLine: 'underline' }}> Privacy Policy</Text>,
+                                                <Text onPress={() => router.push('/policies/refund')} style={{ color: '#1A237E', fontWeight: 'bold', textDecorationLine: 'underline' }}> Refund Policy</Text>, and
+                                                <Text onPress={() => router.push('/policies/contact')} style={{ color: '#1A237E', fontWeight: 'bold', textDecorationLine: 'underline' }}> Contact Us</Text> of Force Player Field Pvt. Ltd.
                                             </Text>
                                         </TouchableOpacity>
 
