@@ -27,7 +27,7 @@ const createLinkedAccount = async (organizerData, secrets) => {
     const cleanSecret = secrets.RAZORPAY_KEY_SECRET?.trim();
     const auth = Buffer.from(`${cleanId}:${cleanSecret}`).toString('base64');
 
-    console.log(`🔗 Creating linked account for: ${organizerData.name}`);
+    console.log('🔗 Creating linked account for organizer');
 
     // Step 1: Create linked account
     const accountResponse = await fetch('https://api.razorpay.com/v1/accounts', {
@@ -784,9 +784,6 @@ exports.linkRouteAccount = onCall(
         cors: ["http://localhost:8081", "https://force-player-register-ap-ade3a.web.app", "https://force-player-register-ap-ade3a.firebaseapp.com"]
     },
     async (request) => {
-        console.log('🔗 Link Account Request:', request.data);
-        console.log('👤 User Auth:', { uid: request.auth?.uid, token: request.auth?.token });
-
         if (!request.auth || (request.auth.token.role !== 'owner' && !request.auth.token.admin)) {
             console.error('❌ Permission Denied: User is not owner/admin');
             throw new HttpsError('permission-denied', 'Unauthorized');

@@ -97,7 +97,13 @@ service cloud.firestore {
         allow create: if isSignedIn() && 
                          isValidSize() &&
                          (!('email' in request.resource.data) || isValidEmail(request.resource.data.email)) &&
-                         (!('phone' in request.resource.data) || isValidPhone(request.resource.data.phone));
+                         (!('phone' in request.resource.data) || isValidPhone(request.resource.data.phone)) &&
+                         // Security: Prevent client-side payment spoofing
+                         (!('paid' in request.resource.data) || request.resource.data.paid == false) &&
+                         !('paymentId' in request.resource.data) &&
+                         !('orderId' in request.resource.data) &&
+                         !('paidAmount' in request.resource.data) &&
+                         !('paidAt' in request.resource.data);
         
         allow read: if isSignedIn() && (
           isOwner() || 

@@ -15,11 +15,6 @@ if (Platform.OS !== 'web') {
 // So we switch to favor process.env.
 const RAZORPAY_KEY_ID = process.env.EXPO_PUBLIC_RAZORPAY_KEY_ID || Constants.expoConfig?.extra?.EXPO_PUBLIC_RAZORPAY_KEY_ID;
 
-console.log('🔑 Constants.expoConfig Key:', Constants.expoConfig?.extra?.EXPO_PUBLIC_RAZORPAY_KEY_ID);
-console.log('🔑 process.env Key:', process.env.EXPO_PUBLIC_RAZORPAY_KEY_ID);
-console.log('💳 Razorpay Active Key:', RAZORPAY_KEY_ID ? RAZORPAY_KEY_ID.substring(0, 10) + '...' : 'MISSING');
-
-
 if (!RAZORPAY_KEY_ID) {
     console.error('⚠️ RAZORPAY_KEY_ID not configured. Payment will fail.');
 }
@@ -60,7 +55,6 @@ export const RazorpayService = {
             const functions = getFunctions();
             const createPaymentWithRoute = httpsCallable(functions, 'createPaymentWithRoute');
 
-            console.log('📦 Creating payment order with Route:', paymentData);
             const result = await createPaymentWithRoute({
                 ...paymentData,
                 transactionId: paymentData.transactionId || null
@@ -68,7 +62,6 @@ export const RazorpayService = {
 
             if (result.data.success) {
                 console.log('✅ Order created:', result.data.orderId);
-                console.log(`💰 Split: ₹${result.data.organizerShare} (held) + ₹${result.data.platformCommission} (instant)`);
 
                 if (result.data.kycWarning) {
                     console.warn('⚠️', result.data.kycWarning);
@@ -93,14 +86,6 @@ export const RazorpayService = {
         const VERSION = "1.0.3-HARDENED";
         console.log(`🚀 [RazorpayService v${VERSION}] Opening Checkout...`);
         const amount = parseFloat(options.amount);
-        console.log(`💳 Diagnostic Parameters:`, {
-            tournamentId: options.tournamentId,
-            tourneyType: typeof options.tournamentId,
-            playerId: options.playerId,
-            playerType: typeof options.playerId,
-            amount: amount,
-            transactionId: options.transactionId
-        });
 
         if (isNaN(amount) || amount <= 0) {
             console.error("Invalid amount for Razorpay:", options.amount);
@@ -177,8 +162,6 @@ export const RazorpayService = {
 
             return new Promise((resolve, reject) => {
                 try {
-                    console.log("Opening Razorpay Checkout with Route order:", { ...fullOptions, key: '***' });
-
                     if (!window.Razorpay) {
                         throw new Error("Razorpay Web SDK not loaded. Please refresh.");
                     }
@@ -186,7 +169,6 @@ export const RazorpayService = {
                     const rzp1 = new window.Razorpay({
                         ...fullOptions,
                         handler: (response) => {
-                            console.log("Razorpay Payment Success:", response);
                             // Return full response object for server-side verification
                             resolve({
                                 razorpay_payment_id: response.razorpay_payment_id,
