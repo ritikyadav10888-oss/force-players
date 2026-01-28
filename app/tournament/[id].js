@@ -1019,6 +1019,30 @@ export default function TournamentRegistrationScreen() {
         });
 
         try {
+            // 0. Ensure Authentication (Vital for DB/Storage Permissions)
+            // MOVED TO TOP: Must happen before any DB reads (like duplicate checks)
+            let currentUser = auth.currentUser || user;
+            if (!currentUser) {
+                console.log("Not signed in, forcing anonymous login...");
+                try {
+                    const result = await signInAnonymously(auth);
+                    currentUser = result.user;
+                    // FORCED DELAY: Ensure session propagates before the next write
+                    console.log("Wait for session sync...");
+                    await new Promise(r => setTimeout(r, 1500));
+                } catch (e) {
+                    console.error("Auth Error details:", e);
+                    if (e.code === 'auth/admin-restricted-operation' || e.message?.includes('400')) {
+                        throw new Error("CRITICAL: Anonymous Login is DISABLED in Firebase. Go to Authentication > Sign-in method > Enable Anonymous & Save.");
+                    }
+                    throw new Error(`Authentication failed: ${e.message}`);
+                }
+            }
+
+            if (!currentUser) throw new Error("Could not establish a secure connection (Auth failed).");
+            console.log("Authenticated as:", currentUser.uid);
+            console.log("Proceeding with User ID:", currentUser?.uid);
+
             // Final check just in case (Email & Phone)
             const playerCol = collection(db, 'tournaments', id, 'players');
             const emailQ = query(playerCol, where('email', '==', formData.email.toLowerCase().trim()));
@@ -1155,28 +1179,7 @@ export default function TournamentRegistrationScreen() {
                     }
                 }
             }
-            // 0. Ensure Authentication (Vital for DB/Storage Permissions)
-            let currentUser = auth.currentUser || user;
-            if (!currentUser) {
-                console.log("Not signed in, forcing anonymous login...");
-                try {
-                    const result = await signInAnonymously(auth);
-                    currentUser = result.user;
-                    // FORCED DELAY: Ensure session propagates before the next write
-                    console.log("Wait for session sync...");
-                    await new Promise(r => setTimeout(r, 1500));
-                } catch (e) {
-                    console.error("Auth Error details:", e);
-                    if (e.code === 'auth/admin-restricted-operation' || e.message?.includes('400')) {
-                        throw new Error("CRITICAL: Anonymous Login is DISABLED in Firebase. Go to Authentication > Sign-in method > Enable Anonymous & Save.");
-                    }
-                    throw new Error(`Authentication failed: ${e.message}`);
-                }
-            }
 
-            if (!currentUser) throw new Error("Could not establish a secure connection (Auth failed).");
-            console.log("Authenticated as:", currentUser.uid);
-            console.log("Proceeding with User ID:", currentUser?.uid);
 
             // 1. Pre-flight Validation & Sanitization (Vital for DB/Storage Permissions)
             const sanitizedPhone = (formData.phone || '').replace(/[^0-9]/g, '').slice(-10);
