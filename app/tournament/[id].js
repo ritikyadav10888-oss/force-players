@@ -5,15 +5,18 @@ import { useLocalSearchParams, useRouter } from 'expo-router';
 import { doc, getDoc, addDoc, setDoc, collection, query, where, getDocs, arrayUnion, updateDoc, increment, onSnapshot } from 'firebase/firestore';
 import { ref, uploadBytes, getDownloadURL, uploadString } from 'firebase/storage';
 import { signInAnonymously } from 'firebase/auth';
-import { db, storage, auth } from '../../src/config/firebase';
+import { db, storage, auth, functions } from '../../src/config/firebase';
+import { httpsCallable } from 'firebase/functions';
 import * as ImagePicker from 'expo-image-picker';
 import { useAuth } from '../../src/context/AuthContext';
 import { LinearGradient } from 'expo-linear-gradient';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useNetworkStatus } from '../../src/hooks/useNetworkStatus';
+import Toast from 'react-native-toast-message';
 
 import { RazorpayService } from '../../src/services/RazorpayService';
+import { TransactionService } from '../../src/services/TransactionService';
 import DateTimePicker from '@react-native-community/datetimepicker';
 // Sport Specific Constants
 const GAME_CONFIG = {
@@ -92,9 +95,10 @@ const WAIST_SIZES = ['S (28)', 'M (30)', 'L (32)', 'XL (34)', 'XXL (36)', 'XXXL 
 const JERSEY_SIZES = ['S (36)', 'M (38)', 'L (40)', 'XL (42)', 'XXL (44)', 'XXXL (46)', '32', '34', '48', '50', 'Other'];
 
 export default function TournamentRegistrationScreen() {
-    const { id } = useLocalSearchParams();
+    const { id, duoId } = useLocalSearchParams();
     const router = useRouter();
     const theme = useTheme();
+    const APP_VERSION = "1.1.2-DEBUG";
     const { user } = useAuth();
     const { width } = Dimensions.get('window');
     const isMobile = width < 768;
@@ -104,6 +108,21 @@ export default function TournamentRegistrationScreen() {
     const [organizerInfo, setOrganizerInfo] = useState(null);
     const [existingRegistration, setExistingRegistration] = useState(null);
     const [isAlreadyRegistered, setIsAlreadyRegistered] = useState(false);
+    const [partner1, setPartner1] = useState(null); // The first player of the duo
+    const [registrationDocId, setRegistrationDocId] = useState(null); // Actual Firestore ID
+    const [payForPartner, setPayForPartner] = useState(false); // Only for Duo
+
+    // Diagnostic logging for registration state
+    useEffect(() => {
+        if (existingRegistration) {
+            console.log("📋 Current Registration State:", {
+                id: existingRegistration.id,
+                docId: existingRegistration.docId,
+                regNum: existingRegistration.registrationNumber,
+                paid: existingRegistration.paid
+            });
+        }
+    }, [existingRegistration]);
 
     const [showDatePicker, setShowDatePicker] = useState(false);
     const [datePickerTarget, setDatePickerTarget] = useState({ type: 'main', index: -1 });
@@ -274,7 +293,7 @@ export default function TournamentRegistrationScreen() {
     const uploadImage = async (uri, path) => {
         if (!uri) return null;
         const storageRef = ref(storage, path);
-        const metadata = { customMetadata: { uploaderUid: user?.uid } };
+        const metadata = { customMetadata: { uploaderUid: auth.currentUser?.uid || user?.uid } };
 
         try {
             // Optimization for Web: Handle Data URLs directly
@@ -314,14 +333,29 @@ export default function TournamentRegistrationScreen() {
     const { isOnline } = useNetworkStatus();
 
     useEffect(() => {
-        if (id) fetchTournament();
-        loadDraft();
+        const init = async () => {
+            if (id) {
+                // 1. Handle Auth First
+                if (!auth.currentUser) {
+                    try {
+                        await signInAnonymously(auth);
+                        console.log("✅ Authenticated as guest");
+                    } catch (e) {
+                        if (e.code === 'auth/admin-restricted-operation') {
+                            console.error("❌ Anonymous Auth is DISABLED in Firebase Dashboard.");
+                        } else {
+                            console.error("❌ Auth failed:", e.message);
+                        }
+                    }
+                }
 
-        // Auto-login Guest for DB Permission
-        if (!user) {
-            signInAnonymously(auth).catch(e => console.error("Guest login failed", e));
-        }
-    }, [id, user]);
+                // 2. Load Data
+                fetchTournament();
+                loadDraft();
+            }
+        };
+        init();
+    }, [id]);
 
     // Load Draft
     const loadDraft = async () => {
@@ -341,17 +375,24 @@ export default function TournamentRegistrationScreen() {
 
                     if (!playersSnap.empty) {
                         const regDoc = playersSnap.docs[0];
-                        const regData = { ...regDoc.data(), docId: regDoc.id };
+                        const regData = { ...regDoc.data(), id: regDoc.id };
                         setExistingRegistration(regData);
                         setIsAlreadyRegistered(true);
+                        console.log("✅ Recovered registration from Firestore:", regDoc.id);
                     } else {
-                        // Registration not found in Firestore, clear local storage
+                        // Registration not found in Firestore, clean local storage
                         await AsyncStorage.removeItem(`enrolled_${id}`);
                     }
                 } catch (firestoreError) {
                     console.log('Error fetching registration from Firestore:', firestoreError);
                     // Fallback to local data without paid status
-                    setExistingRegistration({ registrationNumber: data.registrationId });
+                    const fallbackId = data.registrationId || data.id || 'RECOVERY_MISSING_ID';
+                    setExistingRegistration({
+                        ...data,
+                        registrationNumber: fallbackId,
+                        id: fallbackId,
+                        docId: fallbackId
+                    });
                     setIsAlreadyRegistered(true);
                 }
             }
@@ -440,22 +481,16 @@ export default function TournamentRegistrationScreen() {
                 const data = docSnap.data();
                 setTournament(data);
 
-                // Fetch current enrollments if Team-Related
-                if (data.tournamentType === 'Team' || (data.tournamentType === 'Normal' && data.entryType === 'Team')) {
-                    setFetchingCounts(true);
-                    const pSnap = await getDocs(collection(db, 'tournaments', id, 'players'));
-                    const counts = {};
-                    pSnap.docs.forEach(p => {
-                        const pname = p.data().teamName;
-                        if (pname) counts[pname] = (counts[pname] || 0) + 1;
-                    });
-                    setTeamCounts(counts);
-                    setFetchingCounts(false);
-                }
+                // Removed per-team count query as it requires elevated permissions and causes console noise for guests.
+                // Registrations will still work; this data is only for UI decorators.
 
                 if (data.organizerId) {
-                    const orgDoc = await getDoc(doc(db, 'users', data.organizerId));
-                    if (orgDoc.exists()) setOrganizerInfo(orgDoc.data());
+                    try {
+                        const orgDoc = await getDoc(doc(db, 'users', data.organizerId));
+                        if (orgDoc.exists()) setOrganizerInfo(orgDoc.data());
+                    } catch (orgErr) {
+                        console.warn("⚠️ Could not fetch organizer info (Permissions):", orgErr.message);
+                    }
                 }
             } else {
                 Alert.alert('Error', 'Tournament not found');
@@ -463,22 +498,40 @@ export default function TournamentRegistrationScreen() {
         } catch (error) {
             console.error("Error fetching tournament:", error);
         } finally {
+            if (duoId) {
+                try {
+                    const getPartnerPublicInfo = httpsCallable(functions, 'getPartnerPublicInfo');
+                    const result = await getPartnerPublicInfo({ tournamentId: id, playerId: duoId });
+
+                    if (result.data && result.data.success) {
+                        const dData = result.data;
+                        setPartner1(dData);
+                        // Force Duo mode and inherit team name
+                        setFormData(prev => ({
+                            ...prev,
+                            registrationMode: 'Duo',
+                            teamName: dData.teamName || ''
+                        }));
+                    }
+                } catch (e) {
+                    console.error("Duo lookup failed:", e.message);
+                }
+            }
             setLoading(false);
         }
     };
 
-    const handleEmailBlur = async () => {
-        if (!formData.email.includes('@')) return;
+    const performEmailLookup = async (checkEmail) => {
         try {
             // 1. Check for duplicate registration in this tournament (Email)
             const emailQuery = query(
                 collection(db, 'tournaments', id, 'players'),
-                where('email', '==', formData.email.toLowerCase().trim())
+                where('email', '==', checkEmail)
             );
             const emailSnap = await getDocs(emailQuery);
 
             let regDoc = !emailSnap.empty ? emailSnap.docs[0] : null;
-            let regData = regDoc ? { ...regDoc.data(), docId: regDoc.id } : null;
+            let regData = regDoc ? { ...regDoc.data(), id: regDoc.id } : null;
 
             // 2. Check by Phone if not found by email
             if (!regData && formData.phone) {
@@ -489,7 +542,7 @@ export default function TournamentRegistrationScreen() {
                 const phoneSnap = await getDocs(phoneQuery);
                 if (!phoneSnap.empty) {
                     regDoc = phoneSnap.docs[0];
-                    regData = { ...regDoc.data(), docId: regDoc.id };
+                    regData = { ...regDoc.data(), id: regDoc.id };
                 }
             }
 
@@ -536,37 +589,73 @@ export default function TournamentRegistrationScreen() {
             setIsAlreadyRegistered(false);
             setExistingRegistration(null);
 
-            // 3. Fetch Master Profile to autofill
-            const q = query(collection(db, 'master_players'), where('email', '==', formData.email.toLowerCase().trim()));
-            const snap = await getDocs(q);
-            if (!snap.empty) {
-                const data = snap.docs[0].data();
-                const updates = {};
-                if (data.personal) {
-                    updates.name = data.personal.name || '';
-                    updates.phone = data.personal.phone || '';
-                    updates.age = data.personal.age || '';
-                    updates.dob = data.personal.dob || '';
-                    updates.address = data.personal.address || '';
-                    updates.adharId = data.personal.adharId || '';
-                    updates.emergencyPhone = data.personal.emergencyPhone || '';
-                    updates.bloodGroup = data.personal.bloodGroup || '';
+            // 3. Fetch Master Profile to autofill (Wrapped in try-catch, only works if permissions allow)
+            try {
+                const q = query(collection(db, 'master_players'), where('email', '==', checkEmail));
+                const snap = await getDocs(q);
+                if (!snap.empty) {
+                    const data = snap.docs[0].data();
+                    const updates = {};
+                    if (data.personal) {
+                        updates.name = data.personal.name || '';
+                        updates.phone = data.personal.phone || '';
+                        updates.age = data.personal.age || '';
+                        updates.dob = data.personal.dob || '';
+                        updates.address = data.personal.address || '';
+                        updates.adharId = data.personal.adharId || '';
+                        updates.emergencyPhone = data.personal.emergencyPhone || '';
+                        updates.bloodGroup = data.personal.bloodGroup || '';
+                    }
+                    if (data.kit) {
+                        updates.jerseyName = data.kit.jerseyName || '';
+                        updates.jerseyNumber = data.kit.jerseyNumber || '';
+                        updates.jerseySize = data.kit.jerseySize || 'L';
+                    }
+                    if (data.career) updates.careerLevel = data.career.level || 'Amateur';
+                    if (data.gameProfiles && data.gameProfiles[tournament?.gameName]) {
+                        const sportData = data.gameProfiles[tournament?.gameName];
+                        updates.role = sportData.role || '';
+                        updates.sportAttributes = { ...sportData };
+                        delete updates.sportAttributes.role; // already set
+                    }
+                    setFormData(prev => ({ ...prev, ...updates }));
                 }
-                if (data.kit) {
-                    updates.jerseyName = data.kit.jerseyName || '';
-                    updates.jerseyNumber = data.kit.jerseyNumber || '';
-                    updates.jerseySize = data.kit.jerseySize || 'L';
-                }
-                if (data.career) updates.careerLevel = data.career.level || 'Amateur';
-                if (data.gameProfiles && data.gameProfiles[tournament?.gameName]) {
-                    const sportData = data.gameProfiles[tournament?.gameName];
-                    updates.role = sportData.role || '';
-                    updates.sportAttributes = { ...sportData };
-                    delete updates.sportAttributes.role; // already set
-                }
-                setFormData(prev => ({ ...prev, ...updates }));
+            } catch (masterLookupErr) {
+                console.log("Master profile lookup skipped (Permissions)");
             }
         } catch (e) { console.log("Email blur check error:", e); }
+    };
+
+    const handleEmailBlur = async () => {
+        const emailLower = formData.email.toLowerCase().trim();
+        if (!emailLower.includes('@')) return;
+
+        const domain = emailLower.split('@')[1];
+        const typoDomains = {
+            'gamil.com': 'gmail.com',
+            'gmial.com': 'gmail.com',
+            'gnail.com': 'gmail.com',
+            'gmai.com': 'gmail.com',
+            'gmil.com': 'gmail.com',
+            'yaho.com': 'yahoo.com',
+            'yahooo.com': 'yahoo.com',
+            'hotmial.com': 'hotmail.com',
+            'outlok.com': 'outlook.com'
+        };
+
+        if (typoDomains[domain]) {
+            Alert.alert(
+                "Check Email Spelling",
+                `You entered @${domain}. Did you mean @${typoDomains[domain]}?`,
+                [
+                    { text: "No, keep it", onPress: () => performEmailLookup(emailLower) },
+                    { text: "Yes, fix it", onPress: () => updateForm('email', emailLower.replace(domain, typoDomains[domain])) }
+                ]
+            );
+            return;
+        }
+
+        performEmailLookup(emailLower);
     };
 
     const validateStep = () => {
@@ -684,6 +773,113 @@ export default function TournamentRegistrationScreen() {
         return true;
     };
 
+    // Unified Payment Handler
+    const processPayment = async (playerId, amount, playerName) => {
+        console.log(`💳 processPayment call: playerId param=${playerId}, amount=${amount}`);
+
+        // Resolve playerId from existingRegistration if parameter is missing/null/undefined
+        let resolvedPlayerId = playerId;
+        if (!resolvedPlayerId || resolvedPlayerId === 'undefined' || resolvedPlayerId === 'null') {
+            if (existingRegistration) {
+                resolvedPlayerId = existingRegistration.id || existingRegistration.docId || existingRegistration.registrationNumber;
+                console.log(`🔍 Resolved playerId from State: ${resolvedPlayerId} (Source: ${existingRegistration.id ? 'id' : (existingRegistration.docId ? 'docId' : 'regNum')})`);
+            }
+        }
+
+        // Final safety check before proceeding
+        if (!resolvedPlayerId || String(resolvedPlayerId) === 'undefined' || String(resolvedPlayerId) === 'null') {
+            console.error("❌ ABORTING: No record ID found for this registration.", {
+                passedId: playerId,
+                state: existingRegistration
+            });
+            Alert.alert(
+                "System Error",
+                "We couldn't link your payment to your registration ID. Please refresh the page and try again.",
+                [{ text: "Refresh", onPress: () => router.replace(`/tournament/${id}`) }]
+            );
+            setPaymentStatus('failed');
+            return false;
+        }
+
+        const finalPlayerIdStr = String(resolvedPlayerId).trim();
+        console.log(`✅ Proceeding with resolvedPlayerId: "${finalPlayerIdStr}"`);
+
+        setPaymentStatus('pending');
+        setPaymentModalVisible(true);
+        setErrorMessage('');
+
+        let transactionId = null;
+        try {
+            // 1. Create a transaction record in Firestore via Backend
+            console.log("Creating transaction record...");
+            transactionId = await TransactionService.initiatePlayerPayment({
+                tournamentId: id,
+                amount: amount,
+                playerName: playerName,
+                playerId: finalPlayerIdStr,
+                source: 'tournament_registration',
+                isDuoJoining: !!duoId
+            });
+            console.log("Transaction ID created:", transactionId);
+
+            // 2. Open Razorpay Checkout (uses Razorpay Route internally)
+            console.log("Opening Razorpay checkout...");
+            const paymentResponse = await RazorpayService.openCheckout({
+                tournamentId: String(id),
+                playerId: finalPlayerIdStr,
+                amount: amount,
+                playerName: playerName,
+                transactionId: transactionId,
+                name: tournament.name,
+                description: `Registration for ${tournament.gameName}`,
+                prefill: {
+                    name: playerName,
+                    email: formData.email,
+                    contact: formData.phone
+                },
+                theme: { color: '#1a237e' }
+            });
+
+            console.log("Checkout complete, response received:", paymentResponse);
+
+            // 3. Server-side Verification (CRITICAL for confirmation)
+            console.log("Verifying payment on server...");
+            const verificationResult = await TransactionService.verifyPayment({
+                ...paymentResponse,
+                tournamentId: id,
+                playerId: playerId,
+                transactionId: transactionId
+            });
+
+            if (verificationResult.success || verificationResult.status === 'captured') {
+                console.log("✅ Payment Verified Successfully");
+                setPaymentStatus('success');
+                setRegistrationId(playerId); // Using document ID as registration ID reference
+
+                // Show success poster after short delay
+                setTimeout(() => {
+                    setPaymentModalVisible(false);
+                    setPosterVisible(true);
+                }, 1500);
+
+                return true;
+            } else {
+                throw new Error("Payment verification failed on server. Please contact support if amount was debited.");
+            }
+        } catch (error) {
+            console.error("❌ Payment Process Error:", error);
+            setPaymentStatus('failed');
+
+            // Map common error messages
+            let msg = error.message || "Payment failed or cancelled.";
+            if (msg.includes("cancelled")) msg = "Payment was cancelled. You can retry from your dashboard.";
+            if (msg.includes("verification")) msg = "We couldn't verify your payment. Please check your bank statement and contact us if money was deducted.";
+
+            setErrorMessage(msg);
+            return false;
+        }
+    };
+
     const nextStep = () => {
         if (validateStep()) setStep(step + 1);
     };
@@ -731,7 +927,7 @@ export default function TournamentRegistrationScreen() {
                     if (data.paid === true) {
                         // Payment was successful!
                         await clearPendingPayment();
-                        setExistingRegistration(data);
+                        setExistingRegistration({ ...data, id: playerDoc.id });
                         setRegistrationId(data.registrationNumber);
                         Alert.alert(
                             "Payment Confirmed!",
@@ -773,7 +969,7 @@ export default function TournamentRegistrationScreen() {
             if (playerDoc.exists() && playerDoc.data().paid === true) {
                 await clearPendingPayment();
                 Alert.alert("Success", "Payment confirmed! Your registration is complete.");
-                setExistingRegistration(playerDoc.data());
+                setExistingRegistration({ ...playerDoc.data(), id: playerDoc.id });
                 setRegistrationId(playerDoc.data().registrationNumber);
             } else {
                 Alert.alert(
@@ -837,7 +1033,7 @@ export default function TournamentRegistrationScreen() {
             if (existingData) {
                 // Block if payment is already completed
                 if (existingData.paid === true) {
-                    setExistingRegistration(existingData);
+                    setExistingRegistration({ ...existingData, id: existingDocId });
                     setIsAlreadyRegistered(true);
                     throw new Error(`You are already registered (ID: ${existingData.registrationNumber}). Payment completed. Please contact the organizer if you have questions.`);
                 } else {
@@ -852,15 +1048,50 @@ export default function TournamentRegistrationScreen() {
                         registrationId: existingDocId
                     });
 
-                    // Skip to payment step using existing registration
-                    const paymentId = await RazorpayService.openCheckout({
+                    // Step A: Check Status for existing transactions to prevent double-charging
+                    const transactionsCol = collection(db, 'transactions');
+                    const existingTxQ = query(
+                        transactionsCol,
+                        where('playerId', '==', existingDocId),
+                        where('tournamentId', '==', id),
+                        where('status', 'in', ['PENDING', 'SUCCESS'])
+                    );
+                    const txSnap = await getDocs(existingTxQ);
+
+                    if (!txSnap.empty) {
+                        const activeTx = txSnap.docs[0].data();
+                        if (activeTx.status === 'SUCCESS') {
+                            Alert.alert("Already Paid", "This registration is already paid. It may take a minute to update.");
+                            setPaymentProcessing(false);
+                            setPaymentModalVisible(false);
+                            return;
+                        } else {
+                            // PENDING - suggest waiting or provide transaction ID
+                            Alert.alert("Payment Pending", "There is already a pending payment for this registration. Please wait 1-2 minutes or check your bank statement.");
+                            setPaymentProcessing(false);
+                            setPaymentModalVisible(false);
+                            return;
+                        }
+                    }
+
+                    // 1. Initiate Transaction
+                    const transactionId = await TransactionService.initiatePlayerPayment({
+                        tournamentId: id,
                         amount: tournament.entryFee,
+                        playerName: existingData.playerName || formData.name,
+                        playerId: existingDocId,
+                        source: Platform.OS === 'web' ? 'Web' : 'Mobile'
+                    });
+
+                    // 2. Open Checkout with Razorpay Route (automatic 95/5 split)
+                    const paymentResponse = await RazorpayService.openCheckout({
+                        tournamentId: String(id),
+                        playerId: String(existingDocId),
+                        amount: tournament.entryFee,
+                        playerName: existingData.playerName || formData.name,
+                        transactionId: transactionId,
                         name: tournament.name,
                         description: `Registration for ${tournament.gameName}`,
-                        notes: {
-                            tournamentId: id,
-                            playerId: existingDocId // Use existing document ID
-                        },
                         prefill: {
                             name: existingData.playerName || formData.name,
                             email: existingData.email || formData.email,
@@ -869,18 +1100,31 @@ export default function TournamentRegistrationScreen() {
                         theme: { color: '#1a237e' }
                     });
 
-                    if (!paymentId) throw new Error("Payment failed or was cancelled.");
+                    if (!paymentResponse || !paymentResponse.razorpay_payment_id) {
+                        setPaymentProcessing(false);
+                        return; // Handle cancellation/dismissal - polling will catch if webhook arrives late
+                    }
 
-                    // Payment successful - webhook will update the status in production
-                    setPaymentStatus('success');
+                    // 3. Subscribe to Transaction Status (Polling/Real-time)
+                    const unsubscribe = TransactionService.subscribeToTransaction(transactionId, (data) => {
+                        console.log("💰 Transaction Update:", data.status);
+                        if (data.status === 'SUCCESS') {
+                            setPaymentStatus('success');
+                            clearPendingPayment();
+                            setTimeout(() => {
+                                setPaymentModalVisible(false);
+                                setPosterVisible(true);
+                                unsubscribe();
+                            }, 1500);
+                        } else if (data.status === 'FAILED') {
+                            setPaymentStatus('failed');
+                            setErrorMessage(data.failureReason || 'Payment failed. Please try again.');
+                            unsubscribe();
+                        }
+                    });
 
-                    // Clear pending payment on success
-                    await clearPendingPayment();
-
-                    setTimeout(() => {
-                        setPaymentModalVisible(false);
-                        setPosterVisible(true);
-                    }, 1000);
+                    // Set timeout to stop polling after some time
+                    setTimeout(() => unsubscribe(), 60000);
 
                     setPaymentProcessing(false);
                     return; // Exit early, don't create new registration
@@ -912,23 +1156,53 @@ export default function TournamentRegistrationScreen() {
                 }
             }
             // 0. Ensure Authentication (Vital for DB/Storage Permissions)
-            let currentUser = user;
+            let currentUser = auth.currentUser || user;
             if (!currentUser) {
                 console.log("Not signed in, forcing anonymous login...");
-                const result = await signInAnonymously(auth);
-                currentUser = result.user;
+                try {
+                    const result = await signInAnonymously(auth);
+                    currentUser = result.user;
+                    // FORCED DELAY: Ensure session propagates before the next write
+                    console.log("Wait for session sync...");
+                    await new Promise(r => setTimeout(r, 1500));
+                } catch (e) {
+                    console.error("Auth Error details:", e);
+                    if (e.code === 'auth/admin-restricted-operation' || e.message?.includes('400')) {
+                        throw new Error("CRITICAL: Anonymous Login is DISABLED in Firebase. Go to Authentication > Sign-in method > Enable Anonymous & Save.");
+                    }
+                    throw new Error(`Authentication failed: ${e.message}`);
+                }
             }
+
+            if (!currentUser) throw new Error("Could not establish a secure connection (Auth failed).");
+            console.log("Authenticated as:", currentUser.uid);
             console.log("Proceeding with User ID:", currentUser?.uid);
 
-            // 1. Determine Payable Amount
-            // Each player pays the full entry fee (no splitting for teams)
+            // 1. Pre-flight Validation & Sanitization (Vital for DB/Storage Permissions)
+            const sanitizedPhone = (formData.phone || '').replace(/[^0-9]/g, '').slice(-10);
+            const sanitizedEmail = (formData.email || '').toLowerCase().trim();
+            const emailRegex = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/;
+
+            if (sanitizedPhone.length !== 10) throw new Error("Validation Error: Phone must be 10 digits (0-9 only).");
+            if (!emailRegex.test(sanitizedEmail)) throw new Error("Validation Error: Invalid email format.");
+
+            // 2. Determine Payable Amount
             let payableAmount = tournament.entryFee;
 
-            // 2. Upload Images First (Preparation)
+            // If joining a duo that was already paid for
+            if (duoId && partner1?.paidForPartner) {
+                payableAmount = 0;
+                console.log("💰 Partner already paid for this duo. Entry fee set to 0.");
+            } else if (formData.registrationMode === 'Duo' && payForPartner && !duoId) {
+                payableAmount = tournament.entryFee * 2;
+                console.log(`💰 Captain paying for both: ${payableAmount}`);
+            }
+
+            // 3. Upload Images First (Preparation)
             // Ensure unique filenames every time to hit 'resource == null' rule
             const timestamp = Date.now();
-            const playerImgUrl = await uploadImage(formData.playerImage, `players/${formData.email}/profile_${timestamp}.jpg`);
-            const adharImgUrl = await uploadImage(formData.adharImage, `players/${formData.email}/adhar_${timestamp}.jpg`);
+            const playerImgUrl = await uploadImage(formData.playerImage, `players/${sanitizedEmail}/profile_${timestamp}.jpg`);
+            const adharImgUrl = await uploadImage(formData.adharImage, `players/${sanitizedEmail}/adhar_${timestamp}.jpg`);
 
             let finalTeamLogo = null;
             if (formData.teamLogo && !formData.teamLogo.startsWith('http')) {
@@ -951,10 +1225,13 @@ export default function TournamentRegistrationScreen() {
                 }
             }
 
+            // Step 3 & 4 logic follows...
+
+
             // 3. Prepare Registration Data
             const profileData = {
-                email: formData.email,
-                userId: user?.uid || null,
+                email: sanitizedEmail,
+                userId: currentUser.uid,
                 personal: {
                     name: formData.name, phone: formData.phone, age: formData.age, dob: formData.dob,
                     gender: formData.gender, address: formData.address, adharId: formData.adharId,
@@ -977,13 +1254,16 @@ export default function TournamentRegistrationScreen() {
             const registrationDoc = {
                 registrationNumber: uniqueNum,
                 playerName: formData.name,
-                email: formData.email,
-                phone: formData.phone,
-                userId: user?.uid || null,
+                email: sanitizedEmail,
+                phone: sanitizedPhone,
+                userId: currentUser?.uid || null,
                 teamName: (formData.registrationMode === 'Team' && formData.selectedPredefinedTeam && formData.selectedPredefinedTeam !== 'Custom Team') ? formData.selectedPredefinedTeam : (formData.teamName || 'Solo'),
                 teamLogo: finalTeamLogo,
                 teamMembers: processedMembers.length > 0 ? processedMembers : null,
                 entryType: formData.registrationMode,
+                partnerDuoId: duoId || null, // Link to partner if joining
+                isDuoSource: formData.registrationMode === 'Duo' && !duoId, // Mark as first of duo
+                paidForPartner: (formData.registrationMode === 'Duo' && payForPartner && !duoId),
                 data: profileData,
                 paid: payableAmount === 0, // Paid if free, otherwise false
                 paidAmount: payableAmount,
@@ -991,8 +1271,19 @@ export default function TournamentRegistrationScreen() {
                 status: payableAmount === 0 ? 'approved' : 'pending'
             };
 
-            const docRef = await addDoc(collection(db, 'tournaments', id, 'players'), registrationDoc);
-            console.log("Registration initialised:", docRef.id);
+            console.log("📝 Step 1: Writing to Player Subcollection...");
+            let docRef;
+            try {
+                docRef = await addDoc(collection(db, 'tournaments', id, 'players'), registrationDoc);
+                setRegistrationDocId(docRef.id);
+                console.log("✅ Registration initialised:", docRef.id);
+            } catch (playerWriteErr) {
+                console.error("❌ Player Write Failed:", playerWriteErr);
+                throw new Error(`Permission Denied at Player creation: ${playerWriteErr.message}`);
+            }
+
+            // Increment playerCount skip for now (security rules block direct player updates)
+            // This should be done via Cloud Functions or Triggers
 
             // Set registration ID immediately so user can see it
             setRegistrationId(uniqueNum);
@@ -1008,7 +1299,7 @@ export default function TournamentRegistrationScreen() {
             // Send Registration Confirmation Email
             try {
                 const emailData = {
-                    to: formData.email,
+                    to: sanitizedEmail,
                     message: {
                         subject: `Registration Confirmed - ${tournament.name}`,
                         html: `
@@ -1130,61 +1421,45 @@ export default function TournamentRegistrationScreen() {
                     }
                 };
 
-                console.log("📧 Attempting to queue registration email...");
-                console.log("Email will be sent to:", formData.email);
-                console.log("Tournament name:", tournament.name);
-
+                console.log("📧 Step 2: Attempting to queue registration email...");
                 // Queue email via Firebase Extension
                 const mailRef = await addDoc(collection(db, 'mail'), emailData);
-                console.log("✅ Registration confirmation email queued successfully!");
-                console.log("Mail document ID:", mailRef.id);
-                console.log("Email queued for:", formData.email);
+                console.log("✅ Registration confirmation email queued successfully!", mailRef.id);
             } catch (emailError) {
-                console.error("❌ Failed to queue registration email:", emailError);
-                console.error("Error details:", emailError.message);
-                console.error("Error code:", emailError.code);
+                console.warn("⚠️ Failed to queue registration email (ignoring):", emailError.message);
                 // Don't block registration if email fails
             }
 
             // 5. Handle Payment
             if (payableAmount > 0) {
-                const paymentId = await RazorpayService.openCheckout({
-                    amount: payableAmount,
-                    name: tournament.name,
-                    description: `Registration for ${tournament.gameName}`,
-                    notes: {
-                        tournamentId: id,
-                        playerId: docRef.id
-                    },
-                    prefill: {
-                        name: formData.name,
-                        email: formData.email,
-                        contact: formData.phone
-                    },
-                    theme: { color: '#1a237e' }
-                });
-
-                if (!paymentId) throw new Error("Payment failed or was cancelled.");
-
-                // Production: Webhook will update the status
-                console.log('🔒 Production Mode: Webhook will update payment status');
+                const success = await processPayment(docRef.id, payableAmount, formData.name);
+                if (!success) {
+                    setLoading(false);
+                    return;
+                }
             } else {
-                // Free Entry - Already marked as paid in registrationDoc
                 console.log("Free entry registration confirmed.");
+                setRegistrationId(uniqueNum);
+                setPosterVisible(true);
             }
 
-            // 7. Update Master Records and Finalize
-            const masterRef = doc(db, 'master_players', formData.email);
-            await setDoc(masterRef, {
-                ...profileData,
-                enrolledTournaments: arrayUnion({
-                    tournamentId: id,
-                    tournamentName: tournament.name,
-                    gameName: tournament.gameName,
-                    date: new Date().toISOString().split('T')[0],
-                    role: formData.registrationMode === 'Team' ? 'Captain' : 'Player'
-                })
-            }, { merge: true });
+
+            // 7. Update Master Records (Optional - might fail for guests)
+            try {
+                const masterRef = doc(db, 'master_players', formData.email.toLowerCase().trim());
+                await setDoc(masterRef, {
+                    ...profileData,
+                    enrolledTournaments: arrayUnion({
+                        tournamentId: id,
+                        tournamentName: tournament.name,
+                        gameName: tournament.gameName,
+                        date: new Date().toISOString().split('T')[0],
+                        role: formData.registrationMode === 'Team' ? 'Captain' : 'Player'
+                    })
+                }, { merge: true });
+            } catch (masterErr) {
+                console.warn("⚠️ Master profile update skipped:", masterErr.message);
+            }
 
             await AsyncStorage.removeItem(`draft_${id}`);
 
@@ -1192,8 +1467,10 @@ export default function TournamentRegistrationScreen() {
             // Payment successful
             setPaymentStatus('success');
 
-            // Clear pending payment on success
+            // Clear pending payment on success or set existing registration for UI
             await clearPendingPayment();
+            setExistingRegistration({ ...registrationDoc, id: docRef.id });
+            setIsAlreadyRegistered(true);
 
             setTimeout(() => {
                 setPaymentModalVisible(false);
@@ -1201,13 +1478,20 @@ export default function TournamentRegistrationScreen() {
             }, 1000);
 
         } catch (error) {
-            console.error("Registration failed:", error);
+            console.error("❌ Full Registration Failure Details:", error);
+
             if (error.message && error.message.includes('Payment Cancelled')) {
                 setPaymentStatus('idle');
                 setPaymentModalVisible(false);
             } else {
                 setPaymentStatus('failed');
-                const fullError = `${error.code ? '[' + error.code + '] ' : ''}${error.message || "An unexpected error occurred."}`;
+                let userFriendlyMsg = error.message || "An unexpected error occurred.";
+
+                if (userFriendlyMsg.includes("Missing or insufficient permissions")) {
+                    userFriendlyMsg = "Permission Denied: Either you aren't signed in properly (Anonymous Auth) or your data (Phone/Email) violated security rules. Please check your inputs and try again.";
+                }
+
+                const fullError = `${error.code ? '[' + error.code + '] ' : ''}${userFriendlyMsg}`;
                 setErrorMessage(fullError);
                 Alert.alert("Registration Error", fullError);
             }
@@ -1269,14 +1553,50 @@ export default function TournamentRegistrationScreen() {
             <Surface style={styles.successCard} elevation={5}>
                 <Avatar.Icon size={80} icon="check-all" style={{ backgroundColor: '#4CAF50' }} />
                 <Title style={styles.successTitle}>Registration Confirmed!</Title>
-                <Text style={{ textAlign: 'center', marginBottom: 20, color: 'gray' }}>
-                    Welcome to {tournament.name}. Your entry is confirmed.
+                <Text style={{ textAlign: 'center', marginBottom: 20, color: 'gray', paddingHorizontal: 20 }}>
+                    {formData.registrationMode === 'Duo'
+                        ? (payForPartner
+                            ? `Full Team Entry Confirmed. You have paid for both players in ${tournament.name}.`
+                            : `Individual Entry Confirmed. You have paid your share for ${tournament.name}. Your partner still needs to register.`)
+                        : `Welcome to ${tournament.name}. Your entry is confirmed.`
+                    }
                 </Text>
                 <View style={styles.ticket}>
                     <Text style={styles.ticketLabel}>ENTRY NUMBER</Text>
                     <Title style={{ fontSize: 28, letterSpacing: 2 }}>{registrationId}</Title>
                 </View>
-                <Button mode="contained" style={{ marginTop: 30, width: '100%', borderRadius: 8 }} onPress={() => router.replace('/')}>
+
+                {/* Duo Share Link */}
+                {formData.registrationMode === 'Duo' && !duoId && (
+                    <View style={{ marginTop: 25, width: '100%', padding: 15, backgroundColor: '#E8EAF6', borderRadius: 12, borderLeftWidth: 5, borderLeftColor: '#3F51B5' }}>
+                        <Text style={{ fontWeight: 'bold', color: '#1A237E', marginBottom: 5 }}>Duo Partner Link</Text>
+                        <Text style={{ fontSize: 13, color: '#555', marginBottom: 15 }}>
+                            {payForPartner
+                                ? "You have paid for both players. Share this link with your partner so they can register for free."
+                                : "Share this link with your partner so they can register and pay their share."
+                            }
+                        </Text>
+                        <Button
+                            mode="contained"
+                            icon="share-variant"
+                            onPress={() => {
+                                const domain = Platform.OS === 'web' ? window.location.origin : 'https://force-player-register-ap-ade3a.web.app';
+                                const shareUrl = `${domain}/tournament/${id}?duoId=${registrationDocId}`;
+                                Share.share({
+                                    message: payForPartner
+                                        ? `Hey! I've paid for our Duo in ${tournament.name}. Register yourself for FREE here: ${shareUrl}`
+                                        : `Hey! I've registered for ${tournament.name}. Join my duo/team here: ${shareUrl}`,
+                                    url: shareUrl
+                                });
+                            }}
+                            style={{ borderRadius: 8 }}
+                        >
+                            Share with Partner
+                        </Button>
+                    </View>
+                )}
+
+                <Button mode="contained" style={{ marginTop: 20, width: '100%', borderRadius: 8 }} onPress={() => router.replace('/')}>
                     Return to Home
                 </Button>
             </Surface>
@@ -1300,6 +1620,26 @@ export default function TournamentRegistrationScreen() {
                             <Text style={styles.headerSubtitle}><MaterialCommunityIcons name="gamepad-variant" /> {tournament.gameName} · {tournament.entryType} Entry</Text>
                         </LinearGradient>
                     </Surface>
+
+                    {/* Joining Duo Partner Info */}
+                    {partner1 && !isAlreadyRegistered && (
+                        <Surface style={{ margin: 15, padding: 15, borderRadius: 12, backgroundColor: '#E3F2FD', borderLeftWidth: 5, borderLeftColor: '#1976D2' }} elevation={2}>
+                            <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                                <Avatar.Text size={40} label={partner1.playerName?.charAt(0) || 'P'} style={{ backgroundColor: '#1976D2' }} />
+                                <View style={{ marginLeft: 15 }}>
+                                    <Text style={{ fontSize: 10, color: '#1976D2', fontWeight: 'bold' }}>JOINING DUO PARTNER</Text>
+                                    <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                                        <Text style={{ fontSize: 16, fontWeight: 'bold' }}>{partner1.playerName}</Text>
+                                        <Chip style={{ height: 20, marginLeft: 8, backgroundColor: '#BBDEFB' }} textStyle={{ fontSize: 9 }}>PARTNER 1</Chip>
+                                    </View>
+                                    <Text style={{ fontSize: 12, color: '#666' }}>Team: {partner1.teamName || 'Duo'}</Text>
+                                </View>
+                            </View>
+                            <Text style={{ fontSize: 11, color: '#1976D2', marginTop: 10, fontStyle: 'italic' }}>
+                                You are registering as the partner for this duo. Your registration will be linked to {partner1.playerName}'s team.
+                            </Text>
+                        </Surface>
+                    )}
 
                     {/* Already Registered Warning */}
                     {isAlreadyRegistered && (
@@ -1360,7 +1700,11 @@ export default function TournamentRegistrationScreen() {
                                             color: existingRegistration?.paid ? "#2E7D32" : "#E65100"
                                         }}
                                     >
-                                        {existingRegistration?.paid ? "PAID" : "PENDING"}
+                                        {existingRegistration?.paid
+                                            ? (existingRegistration?.registrationMode === 'Duo'
+                                                ? (existingRegistration?.paidForPartner ? "PAID (FULL DUO)" : "PAID (INDIVIDUAL)")
+                                                : "PAID")
+                                            : "PENDING"}
                                     </Chip>
                                 </View>
                                 <Divider style={{ marginVertical: 8 }} />
@@ -1378,53 +1722,48 @@ export default function TournamentRegistrationScreen() {
                                     mode="contained"
                                     style={{ marginTop: 15, borderRadius: 8 }}
                                     buttonColor="#E65100"
-                                    onPress={async () => {
-                                        try {
-                                            setPaymentModalVisible(true);
-                                            setPaymentProcessing(true);
-                                            setPaymentStatus('pending');
-
-                                            // Open payment gateway with existing registration
-                                            const paymentId = await RazorpayService.openCheckout({
-                                                amount: tournament.entryFee,
-                                                name: tournament.name,
-                                                description: `Registration for ${tournament.gameName}`,
-                                                notes: {
-                                                    tournamentId: id,
-                                                    playerId: existingRegistration.docId || existingRegistration.id
-                                                },
-                                                prefill: {
-                                                    name: existingRegistration.playerName,
-                                                    email: existingRegistration.email,
-                                                    contact: existingRegistration.phone
-                                                },
-                                                theme: { color: '#1a237e' }
-                                            });
-
-                                            if (!paymentId) throw new Error("Payment cancelled");
-
-                                            setPaymentStatus('success');
-                                            setRegistrationId(existingRegistration.registrationNumber);
-
-                                            setTimeout(() => {
-                                                setPaymentModalVisible(false);
-                                                setPosterVisible(true);
-                                            }, 1000);
-                                        } catch (error) {
-                                            console.error("Payment error:", error);
-                                            setPaymentStatus('failed');
-                                            Alert.alert("Payment Error", error.message || "Payment failed. Please try again.");
-                                        } finally {
-                                            setPaymentProcessing(false);
-                                        }
-                                    }}
+                                    onPress={() => processPayment(
+                                        existingRegistration.id || existingRegistration.docId,
+                                        tournament.entryFee,
+                                        existingRegistration.playerName
+                                    )}
                                 >
                                     Complete Payment Now
                                 </Button>
                             )}
 
+                            {/* EMERGENCY RESET BUTTON */}
+                            <TouchableOpacity
+                                onPress={async () => {
+                                    Alert.alert("Reset Registration?", "This will clear your local registration status. Use only if payment is failing.", [
+                                        { text: "Cancel", style: "cancel" },
+                                        {
+                                            text: "Reset", onPress: async () => {
+                                                await AsyncStorage.removeItem(`enrolled_${id}`);
+                                                await AsyncStorage.removeItem(`pending_payment_${id}`);
+                                                setIsAlreadyRegistered(false);
+                                                setExistingRegistration(null);
+                                                setStep(0);
+                                                Alert.alert("Success", "Local status cleared. Please try registering again.");
+                                            }
+                                        }
+                                    ]);
+                                }}
+                                style={{ marginTop: 20, alignSelf: 'center' }}
+                            >
+                                <Text style={{ color: 'gray', fontSize: 12, textDecorationLine: 'underline' }}>
+                                    Having issues? Click here to Reset (v{APP_VERSION})
+                                </Text>
+                            </TouchableOpacity>
                         </Surface>
                     )}
+
+                    {/* DEBUGGER (Only visible in dev/if needed) */}
+                    <View style={{ padding: 10, opacity: 0.5 }}>
+                        <Text style={{ fontSize: 10, textAlign: 'center' }}>
+                            PlayerID: {existingRegistration?.id || 'null'} | Status: {paymentStatus} | Version: {APP_VERSION}
+                        </Text>
+                    </View>
 
                     {/* Stepper Indicator */}
                     {!isAlreadyRegistered && step > 0 && (
@@ -1659,6 +1998,7 @@ export default function TournamentRegistrationScreen() {
                                     <SegmentedButtons
                                         value={formData.registrationMode}
                                         onValueChange={(val) => {
+                                            if (duoId) return;
                                             updateForm('registrationMode', val);
                                             // Reset team stuff if switching modes
                                             if (val !== 'Team') {
@@ -1671,23 +2011,83 @@ export default function TournamentRegistrationScreen() {
                                                 value: 'Solo',
                                                 label: 'Solo',
                                                 icon: 'account',
-                                                disabled: tournament.tournamentType === 'Team' || GAME_TYPE_MAPPING[tournament.gameName] === 'Team'
+                                                disabled: !!duoId || tournament.tournamentType === 'Team' || GAME_TYPE_MAPPING[tournament.gameName] === 'Team'
                                             },
                                             {
                                                 value: 'Duo',
                                                 label: 'Duo',
                                                 icon: 'account-multiple',
-                                                disabled: tournament.tournamentType === 'Team' || tournament.tournamentType === 'Auction' || GAME_TYPE_MAPPING[tournament.gameName] === 'Solo' || GAME_TYPE_MAPPING[tournament.gameName] === 'Team'
+                                                disabled: (!!duoId && formData.registrationMode !== 'Duo') || tournament.tournamentType === 'Team' || tournament.tournamentType === 'Auction' || GAME_TYPE_MAPPING[tournament.gameName] === 'Solo' || GAME_TYPE_MAPPING[tournament.gameName] === 'Team'
                                             },
                                             {
                                                 value: 'Team',
                                                 label: 'Team',
                                                 icon: 'account-group',
-                                                disabled: tournament.tournamentType === 'Auction' || (tournament.tournamentType === 'Normal' && GAME_TYPE_MAPPING[tournament.gameName] !== 'Team')
+                                                disabled: !!duoId || tournament.tournamentType === 'Auction' || (tournament.tournamentType === 'Normal' && GAME_TYPE_MAPPING[tournament.gameName] !== 'Team')
                                             }
                                         ]}
                                         style={{ marginBottom: 20 }}
                                     />
+
+                                    {/* Team Name for Duo / Custom Team */}
+                                    {(formData.registrationMode === 'Duo' || (formData.registrationMode === 'Team' && (!tournament.teams?.length || formData.selectedPredefinedTeam === 'Custom Team'))) && (
+                                        <View style={{ marginTop: 10, marginBottom: 20 }}>
+                                            <TextInput
+                                                label={formData.registrationMode === 'Duo' ? "Duo / Team Name" : "Team Name"}
+                                                value={formData.teamName}
+                                                onChangeText={(t) => updateForm('teamName', t)}
+                                                mode="outlined"
+                                                editable={!duoId}
+                                                style={styles.input}
+                                                left={<TextInput.Icon icon="account-group" />}
+                                                placeholder="Enter a unique name for your duo"
+                                                error={!!formErrors.teamName}
+                                            />
+                                            {formErrors.teamName ? <Text style={styles.errorText}>{formErrors.teamName}</Text> : null}
+                                            {duoId && <Text style={{ fontSize: 11, color: '#1976D2', marginTop: 5, fontWeight: 'bold' }}>✓ Joining Partner's Team</Text>}
+                                        </View>
+                                    )}
+
+                                    {/* Payment Preference for Duo */}
+                                    {formData.registrationMode === 'Duo' && !duoId && (
+                                        <Surface style={{ padding: 15, borderRadius: 12, backgroundColor: '#FFF9C4', marginBottom: 20, borderLeftWidth: 5, borderLeftColor: '#FBC02D' }} elevation={1}>
+                                            <Text style={{ fontWeight: 'bold', color: '#827717', marginBottom: 10 }}>Payment Preference</Text>
+                                            <TouchableOpacity
+                                                style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 10 }}
+                                                onPress={() => setPayForPartner(false)}
+                                            >
+                                                <MaterialCommunityIcons
+                                                    name={!payForPartner ? "radiobox-marked" : "radiobox-blank"}
+                                                    size={24}
+                                                    color={!payForPartner ? "#FBC02D" : "gray"}
+                                                />
+                                                <View style={{ marginLeft: 10 }}>
+                                                    <Text style={{ fontSize: 14, fontWeight: 'bold' }}>Pay Individually (Standard)</Text>
+                                                    <Text style={{ fontSize: 11, color: '#666' }}>You pay ₹{tournament.entryFee} now. Your partner pays ₹{tournament.entryFee} later.</Text>
+                                                </View>
+                                            </TouchableOpacity>
+
+                                            <TouchableOpacity
+                                                style={{ flexDirection: 'row', alignItems: 'center' }}
+                                                onPress={() => setPayForPartner(true)}
+                                            >
+                                                <MaterialCommunityIcons
+                                                    name={payForPartner ? "radiobox-marked" : "radiobox-blank"}
+                                                    size={24}
+                                                    color={payForPartner ? "#FBC02D" : "gray"}
+                                                />
+                                                <View style={{ marginLeft: 10 }}>
+                                                    <Text style={{ fontSize: 14, fontWeight: 'bold' }}>Pay for Both Now (Full Team)</Text>
+                                                    <Text style={{ fontSize: 11, color: '#666' }}>You pay ₹{tournament.entryFee * 2} now. Your partner joins for FREE.</Text>
+                                                </View>
+                                            </TouchableOpacity>
+
+                                            <View style={{ marginTop: 15, paddingTop: 10, borderTopWidth: 1, borderTopColor: 'rgba(0,0,0,0.05)', flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+                                                <Text style={{ fontWeight: 'bold' }}>Total Payable:</Text>
+                                                <Text style={{ fontSize: 18, fontWeight: '900', color: '#DD2C00' }}>₹{payForPartner ? tournament.entryFee * 2 : tournament.entryFee}</Text>
+                                            </View>
+                                        </Surface>
+                                    )}
 
                                     <Divider style={{ marginBottom: 15 }} />
 
@@ -1950,8 +2350,8 @@ export default function TournamentRegistrationScreen() {
                                         </View>
                                     </Surface>
 
-                                    {/* Partner / Team Roster */}
-                                    {(formData.registrationMode === 'Team' || tournament.entryType === 'Duo') && (!formData.selectedPredefinedTeam || formData.selectedPredefinedTeam === 'Custom Team') && (
+                                    {/* Partner / Team Roster - Hide if joining an existing duo */}
+                                    {(formData.registrationMode === 'Team' || (tournament.entryType === 'Duo' && !duoId)) && (!formData.selectedPredefinedTeam || formData.selectedPredefinedTeam === 'Custom Team') && (
                                         <Surface style={styles.sectionCard} elevation={2}>
                                             <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 15 }}>
                                                 <Title style={[styles.formHeader, { marginBottom: 0 }]}>{tournament.entryType === 'Duo' ? 'Partner Details' : 'Team Roster'}</Title>

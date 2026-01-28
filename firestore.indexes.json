@@ -1,0 +1,33 @@
+{
+    "indexes": [
+        {
+            "collectionGroup": "financial_statements",
+            "queryScope": "COLLECTION",
+            "fields": [
+                {
+                    "fieldPath": "organizerId",
+                    "order": "ASCENDING"
+                },
+                {
+                    "fieldPath": "generatedAt",
+                    "order": "DESCENDING"
+                }
+            ]
+        },
+        {
+            "collectionGroup": "financial_statements",
+            "queryScope": "COLLECTION",
+            "fields": [
+                {
+                    "fieldPath": "ownerId",
+                    "order": "ASCENDING"
+                },
+                {
+                    "fieldPath": "generatedAt",
+                    "order": "DESCENDING"
+                }
+            ]
+        }
+    ],
+    "fieldOverrides": []
+}

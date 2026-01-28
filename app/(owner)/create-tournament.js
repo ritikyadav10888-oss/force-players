@@ -160,6 +160,7 @@ const GAME_ENTRY_CONFIG = {
     "Tennis": ["Solo", "Duo"],
     "Carrom": ["Solo", "Duo"],
     "Squash": ["Solo", "Duo"],
+    "Pickleball": ["Solo", "Duo"],
 
     // Solo Only Games
     "Chess": ["Solo"],

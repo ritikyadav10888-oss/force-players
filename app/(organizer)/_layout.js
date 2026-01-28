@@ -58,6 +58,27 @@ export default function OrganizerLayout() {
                     tabBarItemStyle: { display: 'none' }
                 }}
             />
+            <Tabs.Screen
+                name="financials"
+                options={{
+                    href: null,
+                    tabBarItemStyle: { display: 'none' }
+                }}
+            />
+            <Tabs.Screen
+                name="payouts"
+                options={{
+                    href: null,
+                    tabBarItemStyle: { display: 'none' }
+                }}
+            />
+            <Tabs.Screen
+                name="settlement-lookup"
+                options={{
+                    href: null,
+                    tabBarItemStyle: { display: 'none' }
+                }}
+            />
         </Tabs>
     );
 }

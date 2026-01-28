@@ -1,0 +1,1010 @@
+const functions = require('firebase-functions');
+const { onCall, HttpsError } = require("firebase-functions/v2/https");
+const { onRequest } = require("firebase-functions/v2/https");
+const { onDocumentUpdated } = require("firebase-functions/v2/firestore");
+const admin = require('firebase-admin');
+const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
+
+admin.initializeApp();
+const db = admin.firestore();
+const Razorpay = require('razorpay');
+
+/**
+ * RazorpayX Initialization
+ * Secrets must be set: firebase functions:secrets:set RAZORPAY_KEY_ID RAZORPAY_KEY_SECRET RAZORPAYX_ACCOUNT_NUMBER
+ */
+const getRazorpayInstance = (secrets) => {
+    return new Razorpay({
+        key_id: secrets.RAZORPAY_KEY_ID,
+        key_secret: secrets.RAZORPAY_KEY_SECRET,
+    });
+};
+
+/**
+ * Generic RazorpayX REST API Helper
+ */
+const razorpayXCall = async (endpoint, method, data, secrets) => {
+    const cleanId = secrets.RAZORPAY_KEY_ID?.trim();
+    const cleanSecret = secrets.RAZORPAY_KEY_SECRET?.trim();
+    const auth = Buffer.from(`${cleanId}:${cleanSecret}`).toString('base64');
+
+    console.log(`🔗 RX Call: ${method} ${endpoint} (ID Length: ${cleanId?.length})`);
+
+    const response = await fetch(`https://api.razorpay.com/v1/${endpoint}`, {
+        method,
+        headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Basic ${auth}`
+        },
+        body: data ? JSON.stringify(data) : null
+    });
+
+    if (!response.ok) {
+        const err = await response.json().catch(() => ({}));
+        console.error(`❌ RX Error [${response.status}]:`, JSON.stringify(err));
+        throw new Error(err.error?.description || `RazorpayX Error: ${response.status} ${response.statusText}`);
+    }
+    const result = await response.json();
+    console.log(`✅ RX Response:`, JSON.stringify(result));
+    return result;
+};
+
+// 💡 Secret from your Razorpay Dashboard > Settings > Webhooks
+// Set it via CLI: firebase functions:secrets:set RAZORPAY_SECRET
+
+/**
+ * Unified Razorpay Webhook (Standard + RazorpayX)
+ */
+exports.razorpayWebhook = onRequest(
+    { secrets: ["RAZORPAY_SECRET", "RAZORPAYX_WEBHOOK_SECRET", "RAZORPAY_KEY_ID", "RAZORPAY_KEY_SECRET"] },
+    async (req, res) => {
+        const signature = req.headers['x-razorpay-signature'];
+        const body = req.rawBody;
+
+        if (!body) {
+            return res.status(400).send('Missing body');
+        }
+
+        const RAZORPAY_WEBHOOK_SECRET = process.env.RAZORPAY_SECRET;
+        const RAZORPAYX_WEBHOOK_SECRET = process.env.RAZORPAYX_WEBHOOK_SECRET;
+
+        // 1. Signature Verification (Dual-Secret)
+        let isValid = false;
+        try {
+            // Try Standard Secret first
+            if (RAZORPAY_WEBHOOK_SECRET) {
+                isValid = Razorpay.validateWebhookSignature(body.toString(), signature, RAZORPAY_WEBHOOK_SECRET);
+            }
+
+            // Try RazorpayX Secret second if needed
+            if (!isValid && RAZORPAYX_WEBHOOK_SECRET) {
+                isValid = Razorpay.validateWebhookSignature(body.toString(), signature, RAZORPAYX_WEBHOOK_SECRET);
+                if (isValid) console.log("✅ Verified using RAZORPAYX_WEBHOOK_SECRET");
+            }
+        } catch (err) {
+            console.error('❌ Verification error:', err.message);
+        }
+
+        if (!isValid) {
+            console.error('❌ Signature mismatch');
+            return res.status(400).send('Invalid Signature');
+        }
+
+        const event = req.body.event;
+        const payload = req.body.payload;
+
+        console.log(`🔔 Event: ${event}`);
+
+        // 2. Handle Payment Events (Standard)
+        if (event.startsWith('payment.') || event.startsWith('order.') || event.startsWith('invoice.')) {
+            const entity = payload.payment ? payload.payment.entity : (payload.order ? payload.order.entity : (payload.invoice ? payload.invoice.entity : null));
+            if (!entity) return res.status(200).send('No entity');
+
+            if (event === 'payment.captured' || event === 'order.paid' || event === 'payment.authorized') {
+                const { tournamentId, playerId } = entity.notes || {};
+                if (tournamentId && playerId) {
+                    try {
+                        const tournamentRef = db.collection('tournaments').doc(tournamentId);
+                        const playerRef = tournamentRef.collection('players').doc(playerId);
+
+                        await db.runTransaction(async (transaction) => {
+                            const playerDoc = await transaction.get(playerRef);
+                            const tournamentDoc = await transaction.get(tournamentRef);
+
+                            if (!playerDoc.exists) return;
+                            if (!playerDoc.data().paid) {
+                                // AUTO-CAPTURE LOGIC: If payment is only authorized, capture it first
+                                if (event === 'payment.authorized') {
+                                    try {
+                                        const rzp = getRazorpayInstance({
+                                            RAZORPAY_KEY_ID: process.env.RAZORPAY_KEY_ID,
+                                            RAZORPAY_KEY_SECRET: process.env.RAZORPAY_KEY_SECRET
+                                        });
+                                        console.log(`🎯 Auto-capturing payment: ${entity.id}`);
+                                        await rzp.payments.capture(entity.id, entity.amount, entity.currency || 'INR');
+                                        console.log(`✅ Payment ${entity.id} captured successfully`);
+                                    } catch (captureErr) {
+                                        console.error(`❌ Capture Failed for ${entity.id}:`, captureErr.message);
+                                        // We still mark it as success if it was captured by someone else/already
+                                        if (!captureErr.message?.includes('already been captured')) {
+                                            throw new Error("Capture failed, rolling back transaction");
+                                        }
+                                    }
+                                }
+
+                                transaction.update(playerRef, {
+                                    paid: true,
+                                    paymentId: entity.id,
+                                    orderId: entity.order_id || null,
+                                    method: entity.method || 'unknown',
+                                    paidAmount: (entity.amount || 0) / 100,
+                                    paidAt: admin.firestore.FieldValue.serverTimestamp()
+                                });
+
+                                transaction.update(tournamentRef, {
+                                    totalCollections: admin.firestore.FieldValue.increment((entity.amount || 0) / 100),
+                                    paidPlayerCount: admin.firestore.FieldValue.increment(1)
+                                });
+
+                                const transactionIdFromNotes = entity.notes.transactionId;
+                                const tRef = db.collection('transactions').doc(transactionIdFromNotes || entity.id);
+                                transaction.set(tRef, {
+                                    id: transactionIdFromNotes || entity.id,
+                                    type: 'collection',
+                                    ownerId: 'force_owner', // Master owner
+                                    tournamentId,
+                                    tournamentName: tournamentDoc.exists ? tournamentDoc.data().name : 'Tournament',
+                                    playerId,
+                                    playerName: playerDoc.data().playerName || 'Player',
+                                    amount: (entity.amount || 0) / 100,
+                                    status: 'SUCCESS',
+                                    method: entity.method || 'unknown',
+                                    // Razorpay IDs for future refunds
+                                    razorpayPaymentId: entity.id,
+                                    razorpayOrderId: entity.order_id || null,
+                                    createdAt: new Date().toISOString(), // Standard ISO string for client-side sorting
+                                    webhookReceivedAt: admin.firestore.FieldValue.serverTimestamp(),
+                                    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+                                }, { merge: true });
+                            }
+                        });
+                    } catch (e) { console.error("Payment Sync Err:", e); }
+                }
+            } else if (event === 'payment.failed') {
+                const { transactionId } = entity.notes || {};
+                if (transactionId) {
+                    await db.collection('transactions').doc(transactionId).update({
+                        status: 'FAILED',
+                        failureReason: entity.error_description || 'Unknown',
+                        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+                    });
+                }
+            }
+        }
+
+        // 3. Handle Payout Events (RazorpayX)
+        else if (event.startsWith('payout.')) {
+            const payout = payload.payout.entity;
+            const transactionId = payout.reference_id;
+            const status = event.split('.')[1];
+
+            if (transactionId) {
+                const transactionRef = db.collection('transactions').doc(transactionId);
+                const tDoc = await transactionRef.get();
+
+                if (tDoc.exists) {
+                    const tData = tDoc.data();
+                    let newStatus = tData.status;
+
+                    if (status === 'processed') newStatus = 'SUCCESS';
+                    else if (status === 'reversed') newStatus = 'REVERSED';
+                    else if (['failed', 'rejected', 'cancelled'].includes(status)) newStatus = 'FAILED';
+
+                    await transactionRef.update({
+                        status: newStatus,
+                        webhookReceivedAt: new Date().toISOString(),
+                        updatedAt: new Date().toISOString(),
+                        razorpayStatus: status,
+                        failureReason: (newStatus === 'FAILED') ? (payout.failure_reason || 'Rejected') : null
+                    });
+
+                    if (newStatus === 'SUCCESS') {
+                        if (tData.tournamentId) {
+                            await db.collection('tournaments').doc(tData.tournamentId).update({
+                                settlementStatus: 'completed',
+                                settlementAmount: tData.amount,
+                                settlementDate: new Date().toISOString()
+                            });
+                        }
+
+                        // Create Statement
+                        try {
+                            const tournamentDoc = await db.collection('tournaments').doc(tData.tournamentId).get();
+                            await db.collection('financial_statements').add({
+                                ownerId: 'force_owner',
+                                organizerId: tData.receiver.id,
+                                organizerName: tData.receiver.name,
+                                tournamentId: tData.tournamentId,
+                                tournamentName: (tournamentDoc.exists ? tournamentDoc.data().name : "Settlement"),
+                                totalCollected: tData.totalCollected || tData.amount / 0.95,
+                                platformCommission: tData.commission || (tData.amount / 0.95) * 0.05,
+                                organizerShare: tData.amount,
+                                transactionId,
+                                payoutId: payout.id,
+                                invoiceNumber: `INV-${Date.now().toString().slice(-8)}`,
+                                settlementDate: new Date().toISOString(),
+                                generatedAt: new Date().toISOString(),
+                                type: 'settlement'
+                            });
+                        } catch (err) { console.error("Stmt Err:", err); }
+                    } else if (newStatus === 'FAILED' || newStatus === 'REVERSED') {
+                        if (tData.tournamentId) {
+                            await db.collection('tournaments').doc(tData.tournamentId).update({
+                                settlementStatus: 'pending',
+                                lastPayoutError: payout.failure_reason || 'Failed'
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        res.status(200).send('ok');
+    }
+);
+
+/**
+ * Cloud Function to create organizer (triggered by owner)
+ */
+exports.createOrganizer = onCall(
+    { secrets: ["RAZORPAY_KEY_ID", "RAZORPAY_KEY_SECRET"] },
+    async (request) => {
+        if (!request.auth || (request.auth.token.role !== 'owner' && !request.auth.token.admin)) {
+            throw new HttpsError('permission-denied', 'Unauthorized');
+        }
+
+        const { email, password, name, phone, bankDetails } = request.data;
+
+        try {
+            // Create Firebase Auth User
+            const userRecord = await admin.auth().createUser({
+                email,
+                password,
+                displayName: name,
+                phoneNumber: phone
+            });
+
+            // Set Custom Claims
+            await admin.auth().setCustomUserClaims(userRecord.uid, { role: 'organizer' });
+
+            const rzpXSecrets = {
+                RAZORPAY_KEY_ID: process.env.RAZORPAY_KEY_ID,
+                RAZORPAY_KEY_SECRET: process.env.RAZORPAY_KEY_SECRET
+            };
+
+            const contact = await razorpayXCall('contacts', 'POST', {
+                name, email, contact: phone, type: "vendor", reference_id: userRecord.uid
+            }, rzpXSecrets);
+
+            const fundAccount = await razorpayXCall('fund_accounts', 'POST', {
+                account_type: "bank_account",
+                contact_id: contact.id,
+                bank_account: {
+                    name,
+                    ifsc: bankDetails.ifsc?.trim().toUpperCase(),
+                    account_number: String(bankDetails.accountNumber).replace(/[^a-zA-Z0-9]/g, '')
+                }
+            }, rzpXSecrets);
+
+            // Store in Firestore
+            await db.collection('users').doc(userRecord.uid).set({
+                uid: userRecord.uid,
+                email,
+                name,
+                phone,
+                role: 'organizer',
+                bankDetails,
+                razorpayContactId: contact.id,
+                razorpayFundAccountId: fundAccount.id,
+                createdAt: admin.firestore.FieldValue.serverTimestamp()
+            });
+
+            return { success: true, uid: userRecord.uid };
+        } catch (error) {
+            throw new HttpsError('internal', error.message);
+        }
+    }
+);
+
+/**
+ * Start a Payout Transaction
+ */
+exports.createPayoutTransaction = onCall(
+    { secrets: ["RAZORPAY_KEY_ID", "RAZORPAY_KEY_SECRET"] },
+    async (request) => {
+        if (!request.auth || (request.auth.token.role !== 'owner' && !request.auth.token.admin)) {
+            throw new HttpsError('permission-denied', 'Unauthorized');
+        }
+
+        const { tournamentId, organizerId } = request.data;
+        const tRef = db.collection('tournaments').doc(tournamentId);
+        const tDoc = await tRef.get();
+        if (!tDoc.exists) throw new HttpsError('not-found', 'Tournament not found');
+
+        const tournamentData = tDoc.data();
+        const playersSnap = await tRef.collection('players').where('paid', '==', true).get();
+        const totalCollected = playersSnap.docs.length * (tournamentData.entryFee || 0);
+
+        if (totalCollected <= 0) throw new HttpsError('failed-precondition', 'No funds');
+
+        const commission = totalCollected * 0.05;
+        const share = totalCollected - commission;
+
+        const orgDoc = await db.collection('users').doc(organizerId || tournamentData.organizerId).get();
+        if (!orgDoc.exists) throw new HttpsError('not-found', 'Organizer not found');
+
+        const transactionRef = db.collection('transactions').doc();
+        await transactionRef.set({
+            id: transactionRef.id,
+            type: 'payout',
+            ownerId: 'force_owner',
+            tournamentId,
+            tournamentName: tournamentData.name || 'Tournament',
+            receiver: { id: orgDoc.id, name: orgDoc.data().name },
+            amount: parseFloat(share.toFixed(2)),
+            totalCollected,
+            commission: parseFloat(commission.toFixed(2)),
+            totalRegistrations: playersSnap.docs.length,
+            status: 'STARTED',
+            createdAt: new Date().toISOString()
+        });
+
+        return { success: true, transactionId: transactionRef.id, amount: share };
+    }
+);
+
+/**
+ * Step 2: Push payout to RazorpayX
+ */
+exports.processPayout = onCall(
+    { secrets: ["RAZORPAY_KEY_ID", "RAZORPAY_KEY_SECRET", "RAZORPAYX_ACCOUNT_NUMBER"] },
+    async (request) => {
+        if (!request.auth || (request.auth.token.role !== 'owner' && !request.auth.token.admin)) {
+            throw new HttpsError('permission-denied', 'Unauthorized');
+        }
+
+        const { transactionId } = request.data;
+        const transactionRef = db.collection('transactions').doc(transactionId);
+        const tDoc = await transactionRef.get();
+        if (!tDoc.exists) throw new HttpsError('not-found', 'TX not found');
+
+        const tData = tDoc.data();
+        if (tData.status !== 'STARTED') throw new HttpsError('failed-precondition', 'Already processed');
+
+        const rzpXSecrets = {
+            RAZORPAY_KEY_ID: process.env.RAZORPAY_KEY_ID,
+            RAZORPAY_KEY_SECRET: process.env.RAZORPAY_KEY_SECRET
+        };
+
+        try {
+            console.log("⚙️ Env Check - ID Length:", process.env.RAZORPAY_KEY_ID?.trim().length, "Secret Length:", process.env.RAZORPAY_KEY_SECRET?.trim().length);
+            await transactionRef.update({ status: 'PROCESSING' });
+
+            const organizerDoc = await db.collection('users').doc(tData.receiver.id).get();
+            const orgData = organizerDoc.data();
+            let fundAccountId = orgData.razorpayFundAccountId;
+
+            // AUTO-FIX: If fund account is missing, try to create it on-the-fly
+            if (!fundAccountId && orgData.bankDetails) {
+                console.log(`🛠️ Auto-fixing missing fund account for ${orgData.name}`);
+                try {
+                    let contactId = orgData.razorpayContactId;
+                    if (!contactId) {
+                        const contact = await razorpayXCall('contacts', 'POST', {
+                            name: orgData.name, email: orgData.email, contact: orgData.phone || "0000000000",
+                            type: "vendor", reference_id: organizerDoc.id
+                        }, rzpXSecrets);
+                        contactId = contact.id;
+                    }
+
+                    const fundAccount = await razorpayXCall('fund_accounts', 'POST', {
+                        account_type: "bank_account",
+                        contact_id: contactId,
+                        bank_account: {
+                            name: orgData.name,
+                            ifsc: orgData.bankDetails.ifsc?.trim().toUpperCase(),
+                            account_number: String(orgData.bankDetails.accountNumber).replace(/[^a-zA-Z0-9]/g, '')
+                        }
+                    }, rzpXSecrets);
+
+                    fundAccountId = fundAccount.id;
+                    await organizerDoc.ref.update({
+                        razorpayContactId: contactId,
+                        razorpayFundAccountId: fundAccountId
+                    });
+                } catch (syncErr) {
+                    throw new Error(`Failed to sync organizer bank account: ${syncErr.message}`);
+                }
+            }
+
+            if (!fundAccountId) {
+                throw new Error("Organizer has no linked Fund Account and no bank details available.");
+            }
+
+            const payout = await razorpayXCall('payouts', 'POST', {
+                account_number: process.env.RAZORPAYX_ACCOUNT_NUMBER?.replace(/[^a-zA-Z0-9]/g, ''),
+                fund_account_id: fundAccountId,
+                amount: Math.round(tData.amount * 100),
+                currency: "INR",
+                mode: "IMPS",
+                purpose: "vendor bill",
+                reference_id: transactionId
+            }, rzpXSecrets);
+
+            await transactionRef.update({ gatewayRefId: payout.id });
+            return { success: true, payoutId: payout.id };
+        } catch (error) {
+            await transactionRef.update({ status: 'FAILED', failureReason: error.message });
+            throw new HttpsError('internal', error.message);
+        }
+    }
+);
+
+/**
+ * Step 3: Manual Status Sync (Fallback for missing webhooks)
+ */
+exports.syncPayoutStatus = onCall(
+    { secrets: ["RAZORPAY_KEY_ID", "RAZORPAY_KEY_SECRET"] },
+    async (request) => {
+        const { transactionId } = request.data;
+        const transactionRef = db.collection('transactions').doc(transactionId);
+        const tDoc = await transactionRef.get();
+        if (!tDoc.exists) throw new HttpsError('not-found', 'Transaction not found');
+
+        const tData = tDoc.data();
+        if (!tData.gatewayRefId) throw new HttpsError('failed-precondition', 'No gateway ID yet');
+
+        const rzpXSecrets = {
+            RAZORPAY_KEY_ID: process.env.RAZORPAY_KEY_ID,
+            RAZORPAY_KEY_SECRET: process.env.RAZORPAY_KEY_SECRET
+        };
+
+        try {
+            const payout = await razorpayXCall(`payouts/${tData.gatewayRefId}`, 'GET', null, rzpXSecrets);
+            const status = payout.status;
+            let newStatus = tData.status;
+
+            if (status === 'processed') newStatus = 'SUCCESS';
+            else if (['failed', 'rejected', 'cancelled'].includes(status)) newStatus = 'FAILED';
+            else if (status === 'reversed') newStatus = 'REVERSED';
+            else if (status === 'processing') newStatus = 'PROCESSING';
+            else if (['queued', 'pending'].includes(status)) newStatus = 'PROCESSING';
+
+            if (newStatus !== tData.status) {
+                await transactionRef.update({
+                    status: newStatus,
+                    razorpayStatus: status,
+                    failureReason: payout.failure_reason || null,
+                    updatedAt: new Date().toISOString()
+                });
+
+                if (newStatus === 'SUCCESS' && tData.tournamentId) {
+                    await db.collection('tournaments').doc(tData.tournamentId).update({
+                        settlementStatus: 'completed',
+                        settlementAmount: tData.amount,
+                        settlementDate: new Date().toISOString()
+                    });
+
+                    // Create Statement (Manual Sync Fallback)
+                    try {
+                        const tournamentDoc = await db.collection('tournaments').doc(tData.tournamentId).get();
+                        await db.collection('financial_statements').add({
+                            ownerId: 'force_owner',
+                            organizerId: tData.receiver.id,
+                            organizerName: tData.receiver.name,
+                            tournamentId: tData.tournamentId,
+                            tournamentName: (tournamentDoc.exists ? tournamentDoc.data().name : "Settlement"),
+                            totalCollected: tData.totalCollected || tData.amount / 0.95,
+                            platformCommission: tData.commission || (tData.amount / 0.95) * 0.05,
+                            organizerShare: tData.amount,
+                            transactionId,
+                            payoutId: payout.id,
+                            invoiceNumber: `INV-${Date.now().toString().slice(-8)}`,
+                            settlementDate: new Date().toISOString(),
+                            generatedAt: new Date().toISOString(),
+                            type: 'settlement'
+                        });
+                    } catch (err) { console.error("Sync Stmt Err:", err); }
+                } else if (['FAILED', 'REVERSED'].includes(newStatus) && tData.tournamentId) {
+                    await db.collection('tournaments').doc(tData.tournamentId).update({
+                        settlementStatus: 'pending',
+                        lastPayoutError: payout.failure_reason || `Payout ${newStatus.toLowerCase()}`
+                    });
+                }
+            }
+
+            return { success: true, status: newStatus, gatewayStatus: status };
+        } catch (error) {
+            console.error("Sync Error:", error);
+            throw new HttpsError('internal', error.message);
+        }
+    }
+);
+
+/**
+ * Cloud Function to create Player Payment Transaction (STARTED)
+ */
+exports.createPlayerPaymentTransaction = onCall(
+    async (request) => {
+        const { tournamentId, amount, playerId, playerName } = request.data;
+        const transactionRef = db.collection('transactions').doc();
+        await transactionRef.set({
+            id: transactionRef.id,
+            tournamentId,
+            playerId,
+            playerName,
+            amount: parseFloat(amount),
+            status: 'STARTED',
+            createdAt: admin.firestore.FieldValue.serverTimestamp()
+        });
+        return { success: true, transactionId: transactionRef.id };
+    }
+);
+
+/**
+ * Sync Details
+ */
+exports.syncRazorpayDetails = onDocumentUpdated({
+    document: "users/{userId}",
+    secrets: ["RAZORPAY_KEY_ID", "RAZORPAY_KEY_SECRET"]
+}, async (event) => {
+    const newData = event.data.after.data();
+    if (newData.role !== 'organizer' || !newData.bankDetails) return null;
+
+    const rzpXSecrets = {
+        RAZORPAY_KEY_ID: process.env.RAZORPAY_KEY_ID,
+        RAZORPAY_KEY_SECRET: process.env.RAZORPAY_KEY_SECRET
+    };
+
+    try {
+        let contactId = newData.razorpayContactId;
+        if (!contactId) {
+            const contact = await razorpayXCall('contacts', 'POST', {
+                name: newData.name, email: newData.email, contact: newData.phone || "0000000000",
+                type: "vendor", reference_id: event.params.userId
+            }, rzpXSecrets);
+            contactId = contact.id;
+        }
+
+        const fundAccount = await razorpayXCall('fund_accounts', 'POST', {
+            account_type: "bank_account",
+            contact_id: contactId,
+            bank_account: {
+                name: newData.name,
+                ifsc: newData.bankDetails.ifsc?.trim().toUpperCase(),
+                account_number: String(newData.bankDetails.accountNumber).replace(/[^a-zA-Z0-9]/g, '')
+            }
+        }, rzpXSecrets);
+
+        await event.data.after.ref.update({
+            razorpayContactId: contactId,
+            razorpayFundAccountId: fundAccount.id
+        });
+    } catch (err) { console.error("Sync Err:", err); }
+    return null;
+});
+
+/**
+ * Verify Payment - Server-side signature verification for every payment
+ * Called by the client after Razorpay checkout completes
+ */
+exports.verifyPayment = onCall(
+    { secrets: ["RAZORPAY_KEY_ID", "RAZORPAY_KEY_SECRET"] },
+    async (request) => {
+        const {
+            razorpay_payment_id,
+            razorpay_order_id,
+            razorpay_signature,
+            tournamentId,
+            playerId,
+            transactionId
+        } = request.data;
+
+        // SECURITY: Comprehensive Input Validation
+        if (!razorpay_payment_id || typeof razorpay_payment_id !== 'string') {
+            throw new HttpsError('invalid-argument', 'Invalid payment ID format');
+        }
+
+        if (razorpay_payment_id.length > 50 || !/^pay_[a-zA-Z0-9]+$/.test(razorpay_payment_id)) {
+            throw new HttpsError('invalid-argument', 'Invalid payment ID pattern');
+        }
+
+        // SECURITY: Check for duplicate verification (prevent replay attacks)
+        const existingVerification = await db.collection('payment_verification_logs')
+            .where('razorpay_payment_id', '==', razorpay_payment_id)
+            .where('status', '==', 'VERIFIED')
+            .limit(1)
+            .get();
+
+        if (!existingVerification.empty) {
+            console.warn(`⚠️ Duplicate verification attempt for ${razorpay_payment_id}`);
+            throw new HttpsError('already-exists', 'Payment already verified');
+        }
+
+        const rzpKeySecret = process.env.RAZORPAY_KEY_SECRET?.trim();
+        if (!rzpKeySecret) {
+            console.error('❌ RAZORPAY_KEY_SECRET not configured');
+            throw new HttpsError('internal', 'Payment verification not configured');
+        }
+
+        console.log(`🔐 Verifying payment: ${razorpay_payment_id}`);
+
+        try {
+            let isSignatureValid = false;
+
+            // Step 1: Verify Signature (if order_id and signature are provided)
+            if (razorpay_order_id && razorpay_signature) {
+                const payload = razorpay_order_id + "|" + razorpay_payment_id;
+                const expectedSignature = crypto
+                    .createHmac('sha256', rzpKeySecret)
+                    .update(payload)
+                    .digest('hex');
+
+                isSignatureValid = expectedSignature === razorpay_signature;
+                console.log(`📝 Signature verification: ${isSignatureValid ? '✅ VALID' : '❌ INVALID'}`);
+
+                if (!isSignatureValid) {
+                    // Log the failed verification attempt
+                    await db.collection('payment_verification_logs').add({
+                        razorpay_payment_id,
+                        razorpay_order_id,
+                        tournamentId,
+                        playerId,
+                        status: 'SIGNATURE_MISMATCH',
+                        timestamp: admin.firestore.FieldValue.serverTimestamp(),
+                        ip: request.rawRequest?.ip || 'unknown',
+                        userId: request.auth?.uid || 'anonymous'
+                    });
+                    throw new HttpsError('permission-denied', 'Payment signature verification failed');
+                }
+            }
+
+            // Step 2: Fetch payment details from Razorpay API to double-verify
+            const rzp = getRazorpayInstance({
+                RAZORPAY_KEY_ID: process.env.RAZORPAY_KEY_ID,
+                RAZORPAY_KEY_SECRET: process.env.RAZORPAY_KEY_SECRET
+            });
+
+            const payment = await rzp.payments.fetch(razorpay_payment_id);
+            console.log(`💳 Payment Status from Razorpay: ${payment.status}`);
+
+            // Verify payment status is captured
+            if (payment.status !== 'captured' && payment.status !== 'authorized') {
+                throw new HttpsError('failed-precondition', `Payment not captured. Status: ${payment.status}`);
+            }
+
+            // SECURITY: Verify payment amount matches tournament fee
+            const finalTournamentId = tournamentId || payment.notes?.tournamentId;
+            if (finalTournamentId) {
+                const tournamentDoc = await db.collection('tournaments').doc(finalTournamentId).get();
+                if (tournamentDoc.exists) {
+                    const expectedAmount = tournamentDoc.data()?.entryFee || 0;
+                    const paidAmount = payment.amount / 100;
+
+                    if (Math.abs(paidAmount - expectedAmount) > 0.01) {
+                        console.error(`❌ Amount mismatch: expected ₹${expectedAmount}, got ₹${paidAmount}`);
+                        await db.collection('payment_verification_logs').add({
+                            razorpay_payment_id,
+                            status: 'AMOUNT_MISMATCH',
+                            expectedAmount,
+                            paidAmount,
+                            timestamp: admin.firestore.FieldValue.serverTimestamp()
+                        });
+                        throw new HttpsError('invalid-argument',
+                            `Amount mismatch: expected ₹${expectedAmount}, received ₹${paidAmount}`);
+                    }
+                }
+            }
+
+            // Step 3: Auto-capture if only authorized
+            if (payment.status === 'authorized') {
+                console.log(`🎯 Auto-capturing authorized payment: ${razorpay_payment_id}`);
+                try {
+                    await rzp.payments.capture(razorpay_payment_id, payment.amount, payment.currency);
+                    console.log(`✅ Payment captured successfully`);
+                } catch (captureErr) {
+                    if (!captureErr.message?.includes('already been captured')) {
+                        console.error(`❌ Capture failed:`, captureErr.message);
+                        throw new HttpsError('internal', 'Failed to capture payment');
+                    }
+                }
+            }
+
+            // Step 4: Extract tournament and player info from payment notes or parameters
+            // (Already extracted above for amount verification)
+            const finalPlayerId = playerId || payment.notes?.playerId;
+
+
+            if (!finalTournamentId || !finalPlayerId) {
+                console.warn('⚠️ Missing tournament/player ID in verification');
+            }
+
+            // Step 5: Update Firestore records
+            const batch = db.batch();
+
+            // Update player document
+            if (finalTournamentId && finalPlayerId) {
+                const playerRef = db.collection('tournaments').doc(finalTournamentId)
+                    .collection('players').doc(finalPlayerId);
+                const playerDoc = await playerRef.get();
+
+                if (playerDoc.exists && !playerDoc.data().paid) {
+                    batch.update(playerRef, {
+                        paid: true,
+                        paymentId: razorpay_payment_id,
+                        orderId: razorpay_order_id || null,
+                        method: payment.method || 'unknown',
+                        paidAmount: payment.amount / 100,
+                        paidAt: admin.firestore.FieldValue.serverTimestamp(),
+                        verifiedAt: admin.firestore.FieldValue.serverTimestamp(),
+                        verificationMethod: 'client_callback'
+                    });
+
+                    // Update tournament totals
+                    const tournamentRef = db.collection('tournaments').doc(finalTournamentId);
+                    batch.update(tournamentRef, {
+                        totalCollections: admin.firestore.FieldValue.increment(payment.amount / 100),
+                        paidPlayerCount: admin.firestore.FieldValue.increment(1)
+                    });
+                }
+            }
+
+            // Update/Create transaction record
+            const txnId = transactionId || payment.notes?.transactionId || razorpay_payment_id;
+            const txnRef = db.collection('transactions').doc(txnId);
+            batch.set(txnRef, {
+                id: txnId,
+                type: 'collection',
+                ownerId: 'force_owner',
+                tournamentId: finalTournamentId,
+                playerId: finalPlayerId,
+                amount: payment.amount / 100,
+                status: 'SUCCESS',
+                method: payment.method || 'unknown',
+                razorpayPaymentId: razorpay_payment_id,
+                razorpayOrderId: razorpay_order_id || null,
+                verified: true,
+                verificationMethod: 'client_callback',
+                verifiedAt: admin.firestore.FieldValue.serverTimestamp(),
+                updatedAt: admin.firestore.FieldValue.serverTimestamp()
+            }, { merge: true });
+
+            await batch.commit();
+
+            // Log successful verification
+            await db.collection('payment_verification_logs').add({
+                razorpay_payment_id,
+                razorpay_order_id,
+                tournamentId: finalTournamentId,
+                playerId: finalPlayerId,
+                transactionId: txnId,
+                amount: payment.amount / 100,
+                status: 'VERIFIED',
+                method: payment.method,
+                timestamp: admin.firestore.FieldValue.serverTimestamp()
+            });
+
+            console.log(`✅ Payment verified and recorded: ${razorpay_payment_id}`);
+
+            return {
+                success: true,
+                verified: true,
+                paymentId: razorpay_payment_id,
+                amount: payment.amount / 100,
+                status: payment.status,
+                method: payment.method
+            };
+
+        } catch (error) {
+            console.error('❌ Payment verification error:', error);
+
+            // Don't expose internal errors
+            if (error instanceof HttpsError) {
+                throw error;
+            }
+            throw new HttpsError('internal', 'Payment verification failed. Contact support.');
+        }
+    }
+);
+
+/**
+ * Process Player Refund
+ * Refunds 95% of the payment to the player (5% processing fee retained)
+ * Can only be initiated by tournament organizers or owners
+ */
+exports.processPlayerRefund = onCall(
+    { secrets: ["RAZORPAY_KEY_ID", "RAZORPAY_KEY_SECRET"] },
+    async (request) => {
+        const {
+            tournamentId,
+            playerId,
+            reason,
+            refundPercentage = 95 // Default 95% refund
+        } = request.data;
+
+        // Validate inputs
+        if (!tournamentId || !playerId) {
+            throw new HttpsError('invalid-argument', 'Tournament ID and Player ID are required');
+        }
+
+        if (!request.auth) {
+            throw new HttpsError('unauthenticated', 'User must be authenticated');
+        }
+
+        try {
+            // Get tournament details
+            const tournamentRef = db.collection('tournaments').doc(tournamentId);
+            const tournamentDoc = await tournamentRef.get();
+
+            if (!tournamentDoc.exists) {
+                throw new HttpsError('not-found', 'Tournament not found');
+            }
+
+            const tournament = tournamentDoc.data();
+
+            // Check if user is owner or organizer of this tournament
+            const userDoc = await db.collection('users').doc(request.auth.uid).get();
+            const userRole = userDoc.data()?.role;
+            const isOwner = userRole === 'owner' || userRole === 'admin';
+            const isOrganizer = userRole === 'organizer' && tournament.organizerId === request.auth.uid;
+
+            if (!isOwner && !isOrganizer) {
+                throw new HttpsError('permission-denied', 'Only tournament organizers or owners can process refunds');
+            }
+
+            // Get player registration details
+            const playerRef = tournamentRef.collection('players').doc(playerId);
+            const playerDoc = await playerRef.get();
+
+            if (!playerDoc.exists) {
+                throw new HttpsError('not-found', 'Player registration not found');
+            }
+
+            const player = playerDoc.data();
+
+            // Check if player has paid
+            if (!player.paid) {
+                throw new HttpsError('failed-precondition', 'Player has not made any payment');
+            }
+
+            // Check if already refunded
+            if (player.refunded) {
+                throw new HttpsError('already-exists', 'Refund has already been processed for this player');
+            }
+
+            const paidAmount = player.paidAmount || player.amount || 0;
+            const razorpayPaymentId = player.paymentId;
+
+            if (!razorpayPaymentId) {
+                throw new HttpsError('failed-precondition', 'Payment ID not found. Cannot process refund.');
+            }
+
+            // Calculate refund amount (95% of paid amount)
+            const refundAmount = Math.floor(paidAmount * (refundPercentage / 100) * 100); // Convert to paise
+            const processingFee = Math.floor(paidAmount * ((100 - refundPercentage) / 100) * 100);
+
+            console.log(`💰 Processing refund: ₹${paidAmount} → ₹${refundAmount / 100} (${refundPercentage}%)`);
+
+            // Initialize Razorpay
+            const rzp = getRazorpayInstance({
+                RAZORPAY_KEY_ID: process.env.RAZORPAY_KEY_ID,
+                RAZORPAY_KEY_SECRET: process.env.RAZORPAY_KEY_SECRET
+            });
+
+            // Process refund via Razorpay API
+            const refund = await rzp.payments.refund(razorpayPaymentId, {
+                amount: refundAmount,
+                speed: 'normal', // or 'optimum'
+                notes: {
+                    reason: reason || 'Player cancellation',
+                    tournamentId: tournamentId,
+                    playerId: playerId,
+                    refundPercentage: refundPercentage,
+                    processingFee: processingFee / 100
+                }
+            });
+
+            console.log(`✅ Refund created: ${refund.id}`);
+
+            // Update player document
+            await playerRef.update({
+                refunded: true,
+                refundAmount: refundAmount / 100,
+                refundId: refund.id,
+                refundReason: reason || 'Player cancellation',
+                refundProcessedAt: admin.firestore.FieldValue.serverTimestamp(),
+                refundProcessedBy: request.auth.uid,
+                processingFee: processingFee / 100,
+                refundPercentage: refundPercentage,
+                paid: false, // Mark as unpaid after refund
+                status: 'refunded'
+            });
+
+            // Update tournament totals
+            await tournamentRef.update({
+                totalCollections: admin.firestore.FieldValue.increment(-(paidAmount)),
+                paidPlayerCount: admin.firestore.FieldValue.increment(-1),
+                refundedCount: admin.firestore.FieldValue.increment(1),
+                totalRefunded: admin.firestore.FieldValue.increment(refundAmount / 100)
+            });
+
+            // Create refund transaction record
+            await db.collection('transactions').add({
+                type: 'refund',
+                tournamentId: tournamentId,
+                tournamentName: tournament.name,
+                playerId: playerId,
+                playerName: player.playerName || player.personal?.name,
+                playerEmail: player.email,
+                originalAmount: paidAmount,
+                refundAmount: refundAmount / 100,
+                processingFee: processingFee / 100,
+                refundPercentage: refundPercentage,
+                razorpayPaymentId: razorpayPaymentId,
+                razorpayRefundId: refund.id,
+                reason: reason || 'Player cancellation',
+                status: 'SUCCESS',
+                processedBy: request.auth.uid,
+                createdAt: new Date().toISOString(),
+                updatedAt: admin.firestore.FieldValue.serverTimestamp()
+            });
+
+            // Send refund confirmation email
+            await db.collection('mail').add({
+                to: player.email,
+                template: {
+                    name: 'refund-confirmation',
+                    data: {
+                        playerName: player.playerName || player.personal?.name,
+                        tournamentName: tournament.name,
+                        originalAmount: paidAmount,
+                        refundAmount: refundAmount / 100,
+                        processingFee: processingFee / 100,
+                        refundPercentage: refundPercentage,
+                        refundId: refund.id,
+                        reason: reason || 'Player cancellation'
+                    }
+                }
+            });
+
+            return {
+                success: true,
+                refundId: refund.id,
+                refundAmount: refundAmount / 100,
+                processingFee: processingFee / 100,
+                refundPercentage: refundPercentage,
+                message: `Refund of ₹${refundAmount / 100} processed successfully. ₹${processingFee / 100} processing fee deducted.`
+            };
+
+        } catch (error) {
+            console.error('❌ Refund processing error:', error);
+
+            if (error instanceof HttpsError) {
+                throw error;
+            }
+
+            // Log failed refund attempt
+            await db.collection('refund_logs').add({
+                tournamentId,
+                playerId,
+                error: error.message,
+                timestamp: admin.firestore.FieldValue.serverTimestamp(),
+                requestedBy: request.auth.uid
+            });
+
+            throw new HttpsError('internal', `Refund failed: ${error.message}`);
+        }
+    }
+);

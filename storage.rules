@@ -2,7 +2,11 @@ rules_version = '2';
 service firebase.storage {
   match /b/{bucket}/o {
     
-    // Helper: Check if user is an Owner
+    // ============================================
+    // HELPER FUNCTIONS
+    // ============================================
+
+    // Check if user is an Owner
     function isOwner() {
       let claimRole = request.auth.token.get('role', 'guest').lower();
       return request.auth != null && (
@@ -11,49 +15,136 @@ service firebase.storage {
       );
     }
 
-    // Helper: Check if user is an Organizer
+    // Check if user is an Organizer
     function isOrganizer() {
       let claimRole = request.auth.token.get('role', 'guest').lower();
       return request.auth != null && claimRole == 'organizer';
     }
 
-    // Player Directory
+    // Validate file size (max 10MB for documents, 5MB for images)
+    function isValidFileSize() {
+      return request.resource.size < 10485760; // 10MB default
+    }
+
+    function isValidImageSize() {
+      return request.resource.size < 5242880; // 5MB for images
+    }
+
+    // Validate content type
+    function isValidImageType() {
+      return request.resource.contentType.matches('image/.*');
+    }
+
+    function isValidDocumentType() {
+      return request.resource.contentType.matches('(image/.*|application/pdf)');
+    }
+
+    // Check if email matches authenticated user
+    function isOwnEmail(email) {
+      return request.auth != null && request.auth.token.email == email;
+    }
+
+    // Check if user is the original uploader
+    function isOriginalUploader() {
+      return resource != null && 
+             resource.metadata.uploaderUid == request.auth.uid;
+    }
+
+    // ============================================
+    // STORAGE RULES
+    // ============================================
+
+    // 1. Player Documents (Profile Photos, Aadhar Cards)
     match /players/{email}/{fileName} {
       
-      // 1. Profile Photos (Public) - Regex match
-      allow read: if fileName.matches('profile_.*');
+      // Profile Photos: Public read access
+      allow read: if fileName.matches('profile_.*') && isValidImageType();
       
-      // 2. Aadhar Cards (Private)
-      allow read: if fileName.matches('adhar_.*') 
-                  && (isOwner() || isOrganizer() || (request.auth != null && request.auth.token.email == email) || (request.auth != null && resource.metadata.uploaderUid == request.auth.uid));
+      // Aadhar Cards: Private - only owner, organizer, or the player themselves
+      allow read: if fileName.matches('adhar_.*') && 
+                     isValidDocumentType() &&
+                     (isOwner() || 
+                      isOrganizer() || 
+                      isOwnEmail(email) || 
+                      isOriginalUploader());
 
-
-      // Universal Write Access for NEW files (Registration)
-      // Allow any authenticated user to upload (for registration)
-      // Modification restricted to Owner or the original Uploader
-      allow write: if request.auth != null;
+      // Write: Restricted to prevent unauthorized overwrites
+      // SECURITY: New uploads must match user's email, existing files can only be updated by owner or original uploader
+      // Updated to allow anonymous users to upload if it's a new file and they are the uploader
+      allow write: if request.auth != null && 
+                      isValidImageSize() &&
+                      isValidImageType() &&
+                      (
+                        isOwner() ||
+                        isOrganizer() ||
+                        (isOwnEmail(email) && (resource == null || isOriginalUploader())) ||
+                        (resource == null && request.resource.metadata.uploaderUid == request.auth.uid)
+                      );
+      
+      // Delete: Only Owner or original uploader
+      allow delete: if isOwner() || (isOwnEmail(email) && isOriginalUploader());
     }
 
-    // 3. Tournament Data (Banners/Logos)
+    // 2. Tournament Assets (Banners, Logos, Team Images)
     match /tournaments/{tournamentId}/teams/{fileName} {
+      // Public read for tournament assets
       allow read: if true;
-      allow write: if request.auth != null;
+      
+      // Write: Only Owner or Organizer (for their tournaments)
+      // SECURITY: Note - we can't verify tournament ownership in Storage rules,
+      // so we rely on Firestore rules to ensure organizerId matches
+      allow write: if (isOwner() || isOrganizer()) && 
+                      isValidImageSize() &&
+                      isValidImageType();
+      
+      // Delete: Only Owner or Organizer
+      allow delete: if isOwner() || isOrganizer();
     }
 
-    match /tournaments/{allPaths=**} {
+    // 3. Tournament General Assets (Banners, Logos, etc.)
+    match /tournaments/{tournamentId}/{allPaths=**} {
+      // Public read for tournament assets
       allow read: if true;
-      allow write: if isOwner() || isOrganizer();
+      
+      // Write: Only Owner or Organizer
+      allow write: if (isOwner() || isOrganizer()) && 
+                      isValidImageSize() &&
+                      isValidImageType();
+      
+      // Delete: Only Owner or Organizer
+      allow delete: if isOwner() || isOrganizer();
     }
 
     // 4. Organizer Documents (Profile, Aadhar, PAN)
     match /organizers/{fileName} {
-       allow read: if isOwner() || isOrganizer(); // Only owners/organizers can view these
-       allow write: if request.auth != null; // Allow upload during creation/edit
+      // Read: Only Owner or Organizer can view organizer documents
+      allow read: if (isOwner() || isOrganizer()) && isValidDocumentType();
+      
+      // Write: Only Owner or Organizer can upload organizer documents
+      // SECURITY: Prevent arbitrary uploads to organizer folder
+      allow write: if (isOwner() || isOrganizer()) && 
+                      isValidFileSize() &&
+                      isValidDocumentType();
+      
+      // Delete: Only Owner
+      allow delete: if isOwner();
     }
 
-    // Default: Deny all by default, only Owners can bypass
+    // 5. Email Attachments (if needed)
+    match /email_attachments/{attachmentId} {
+      // Only Owner can manage email attachments
+      allow read, write, delete: if isOwner() && isValidFileSize();
+    }
+
+    // 6. Audit Logs / Reports (if stored in Storage)
+    match /reports/{reportId} {
+      // Only Owner can access reports
+      allow read, write, delete: if isOwner() && isValidFileSize();
+    }
+
+    // Default: Deny all other paths (only Owner can bypass)
     match /{allPaths=**} {
-      allow read, write: if isOwner();
+      allow read, write, delete: if isOwner();
     }
   }
 }

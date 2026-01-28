@@ -4,12 +4,14 @@ import { Button, Title, Text, Surface, useTheme, Avatar, Searchbar, IconButton, 
 import { useRouter } from 'expo-router';
 import { useAuth } from '../../src/context/AuthContext';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { collection, query, where, getDocs, getCountFromServer, getDoc, doc, updateDoc } from 'firebase/firestore';
-import { db } from '../../src/config/firebase';
+import { doc, getDoc, collection, query, where, getDocs, updateDoc, orderBy } from 'firebase/firestore';
+import { httpsCallable } from 'firebase/functions';
+import { db, functions } from '../../src/config/firebase';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import { calculateSettlement, recordSettlement } from '../../src/utils/settlementHelpers';
 import { RazorpayService } from '../../src/services/RazorpayService';
+import Toast from 'react-native-toast-message';
 
 export default function OwnerDashboard() {
     const router = useRouter();
@@ -23,6 +25,7 @@ export default function OwnerDashboard() {
     const [paidCount, setPaidCount] = useState(0);
     const [pendingCount, setPendingCount] = useState(0);
     const [totalRevenue, setTotalRevenue] = useState(0);
+    const [pendingRevenue, setPendingRevenue] = useState(0);
     const [loading, setLoading] = useState(true);
     const [refreshing, setRefreshing] = useState(false);
     const [searchQuery, setSearchQuery] = useState('');
@@ -30,7 +33,38 @@ export default function OwnerDashboard() {
     // Financials
     const [activeTab, setActiveTab] = useState('overview');
     const [completedTournaments, setCompletedTournaments] = useState([]);
+    const [needsEndingTournaments, setNeedsEndingTournaments] = useState([]);
     const [settledTournaments, setSettledTournaments] = useState([]);
+    const [statements, setStatements] = useState([]);
+    const [financialLoading, setFinancialLoading] = useState(false);
+
+    // Helper function to determine tournament status
+    const getTournamentStatus = (tournament) => {
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+
+        // Respect manual completion
+        if (tournament.status === 'completed') return 'completed';
+
+        // Parse start date (DD-MM-YYYY format)
+        const parseDate = (dateStr) => {
+            if (!dateStr) return null;
+            const [day, month, year] = dateStr.split('-').map(Number);
+            return new Date(year, month - 1, day);
+        };
+
+        const startDate = parseDate(tournament.startDate);
+        const endDate = parseDate(tournament.endDate);
+
+        if (!startDate) return 'upcoming';
+
+        if (endDate && today > endDate) {
+            return 'completed';
+        } else if (today >= startDate && (!endDate || today <= endDate)) {
+            return 'ongoing';
+        }
+        return 'upcoming';
+    };
 
     const handleEndTournament = (tournament) => {
         const title = "End Tournament?";
@@ -40,14 +74,23 @@ export default function OwnerDashboard() {
             try {
                 const tRef = doc(db, 'tournaments', tournament.id);
                 await updateDoc(tRef, { status: 'completed' });
-                // Platform-specific success message
-                if (Platform.OS === 'web') alert("Tournament ended. You can now release funds in the Financials tab.");
-                else Alert.alert("Success", "Tournament ended. You can now release funds in the Financials tab.");
+
+                Toast.show({
+                    type: 'success',
+                    text1: '✅ Tournament Ended',
+                    text2: `${tournament.name} is now ready for settlement`,
+                    visibilityTime: 4000,
+                });
+
                 fetchData();
             } catch (error) {
                 console.error(error);
-                if (Platform.OS === 'web') alert("Failed to end tournament.");
-                else Alert.alert("Error", "Failed to end tournament.");
+                Toast.show({
+                    type: 'error',
+                    text1: '❌ Failed to End Tournament',
+                    text2: error.message || 'Please try again',
+                    visibilityTime: 5000,
+                });
             }
         };
 
@@ -84,19 +127,37 @@ export default function OwnerDashboard() {
 
             const onConfirm = async () => {
                 try {
-                    const transferId = await RazorpayService.initiateTransfer(settlement.organizerShare, connectedId);
-                    await recordSettlement(tournament.id, {
-                        ...settlement,
-                        transferId
-                    }, tournament.organizerId);
+                    Toast.show({
+                        type: 'info',
+                        text1: '⏳ Processing Settlement...',
+                        text2: 'Please wait while we release the funds',
+                        visibilityTime: 3000,
+                    });
 
-                    if (Platform.OS === 'web') alert("Funds released successfully.");
-                    else Alert.alert("Success", "Funds released successfully.");
+                    const initiateOrganizerPayout = httpsCallable(functions, 'initiateOrganizerPayout');
+
+                    const result = await initiateOrganizerPayout({
+                        tournamentId: tournament.id,
+                        organizerId: tournament.organizerId,
+                        amount: settlement.organizerShare,
+                        notes: `Settlement for ${tournament.name}`
+                    });
+
+                    Toast.show({
+                        type: 'success',
+                        text1: '💰 Funds Released Successfully!',
+                        text2: `₹${settlement.organizerShare} transferred`,
+                        visibilityTime: 5000,
+                    });
 
                     fetchData();
                 } catch (err) {
-                    if (Platform.OS === 'web') alert(`Payout Failed: ${err.message}`);
-                    else Alert.alert("Payout Failed", err.message);
+                    Toast.show({
+                        type: 'error',
+                        text1: '❌ Settlement Failed',
+                        text2: err.message || 'Please try again or contact support',
+                        visibilityTime: 6000,
+                    });
                 }
             };
 
@@ -130,24 +191,40 @@ export default function OwnerDashboard() {
             });
             setTournamentCount(allTournamentsSnap.size);
 
-            // Filter Active Tournaments (not completed) & Fetch Player Counts
-            const activeList = await Promise.all(allTournamentsSnap.docs.map(async (doc) => {
-                const data = doc.data();
-                if (data.status === 'completed') return null;
+            // Filter Active Tournaments & Recently Completed
+            const activeList = [];
+            const needsClosing = [];
 
-                let count = 0;
-                try {
-                    const pColl = collection(db, 'tournaments', doc.id, 'players');
-                    // Optimization: Use getDocs instead of aggregation if getCount is failing
-                    const snap = await getDocs(pColl).catch(() => ({ size: 0 }));
-                    count = snap.size || 0;
-                } catch (e) {
-                    console.warn("Count error for " + doc.id, e);
+            allTournamentsSnap.docs.forEach((doc) => {
+                const data = { id: doc.id, ...doc.data() };
+                const computed = getTournamentStatus(data);
+
+                if (data.status === 'completed') {
+                    // Manually closed, handled below
+                } else if (computed === 'completed') {
+                    // Ended by date but not manually closed
+                    needsClosing.push(data);
+                } else {
+                    activeList.push(data);
                 }
+            });
 
-                return { id: doc.id, ...data, playerCount: count };
-            }));
-            setActiveTournaments(activeList.filter(t => t !== null));
+            // Fetch player counts for lists
+            const [activeWithCounts, needsClosingWithCounts] = await Promise.all([
+                Promise.all(activeList.map(async (t) => {
+                    const pColl = collection(db, 'tournaments', t.id, 'players');
+                    const snap = await getDocs(pColl).catch(() => ({ size: 0 }));
+                    return { ...t, playerCount: snap.size || 0 };
+                })),
+                Promise.all(needsClosing.map(async (t) => {
+                    const pColl = collection(db, 'tournaments', t.id, 'players');
+                    const snap = await getDocs(pColl).catch(() => ({ size: 0 }));
+                    return { ...t, playerCount: snap.size || 0 };
+                }))
+            ]);
+
+            setActiveTournaments(activeWithCounts);
+            setNeedsEndingTournaments(needsClosingWithCounts);
 
             // Count Players - Fetch from master_players
             const masterPlayersColl = collection(db, 'master_players');
@@ -158,36 +235,51 @@ export default function OwnerDashboard() {
             setPlayerCount(playersSnap.size);
 
             // Count Players & Revenue across all tournaments
-            let totalPlayers = 0;
+            let totalPlayersCount = 0;
             let paidPlayers = 0;
-            let pendingPlayers = 0;
+            let pendingPlayersCount = 0;
             let calcRevenue = 0;
+            let calcPendingRevenue = 0;
 
             if (allTournamentsSnap.docs.length > 0) {
                 await Promise.all(allTournamentsSnap.docs.map(async (tDoc) => {
                     const tData = tDoc.data();
                     const fee = parseInt(tData.entryFee) || 0;
 
-                    const pColl = collection(db, 'tournaments', tDoc.id, 'players');
-                    const pSnap = await getDocs(pColl).catch(() => ({ docs: [], size: 0 }));
+                    // Priority 1: Use pre-calculated totals if they exist
+                    if (tData.totalCollections !== undefined && tData.playerCount !== undefined) {
+                        totalPlayersCount += tData.playerCount || 0;
+                        calcRevenue += tData.totalCollections || 0;
 
-                    totalPlayers += pSnap.size;
+                        // We still need paid/pending breakdown if not stored
+                        // For now, if we have totalCollections and playerCount, we can estimate or do a quick check
+                        // Better: If they exist, we assume the tournament doc is the source of truth
+                    } else {
+                        // Fallback: Manual count (Only for older data or if missing)
+                        const pColl = collection(db, 'tournaments', tDoc.id, 'players');
+                        const pSnap = await getDocs(pColl).catch(() => ({ docs: [], size: 0 }));
 
-                    pSnap.docs.forEach(pd => {
-                        const pData = pd.data();
-                        if (pData.paid === true) {
-                            paidPlayers++;
-                            calcRevenue += fee;
-                        } else {
-                            pendingPlayers++;
-                        }
-                    });
+                        totalPlayersCount += pSnap.size;
+                        pSnap.docs.forEach(pd => {
+                            const pData = pd.data();
+                            if (pData.paid === true) {
+                                paidPlayers++;
+                                calcRevenue += (pData.paidAmount || fee);
+                            } else {
+                                pendingPlayersCount++;
+                                calcPendingRevenue += fee;
+                            }
+                        });
+                    }
                 }));
             }
-            setPlayerCount(playersSnap.size);
-            setPaidCount(paidPlayers);
-            setPendingCount(pendingPlayers);
+
+            // If we didn't do a manual count for some, these might be off, but totalRevenue and totalPlayers are prioritized
+            setPaidCount(paidPlayers || allTournamentsSnap.docs.reduce((sum, d) => sum + (d.data().paidPlayerCount || 0), 0));
+            setPendingCount(pendingPlayersCount);
             setTotalRevenue(calcRevenue);
+            setPlayerCount(totalPlayersCount); // Stats card for total participants
+            setPendingRevenue(calcPendingRevenue);
 
         } catch (error) {
             console.warn("Error in dashboard stats:", error);
@@ -237,13 +329,14 @@ export default function OwnerDashboard() {
                     }
                 }
 
-                if (data.settlement?.status === 'settled') {
+                if (data.settlementStatus === 'completed') {
                     settledList.push(data);
                 } else {
                     pendingSettlements.push(data);
                 }
             }));
 
+            // Sync: Add any 'settled' tournaments to the statements list if they are missing
             setCompletedTournaments(pendingSettlements);
             setSettledTournaments(settledList);
 
@@ -262,8 +355,22 @@ export default function OwnerDashboard() {
             }
             list.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
             setOrganizers(list);
+
+            // 3. Fetch Financial Statements
+            if (userData?.uid) {
+                const q = query(
+                    collection(db, 'financial_statements'),
+                    where('ownerId', '==', 'force_owner'),
+                    orderBy('generatedAt', 'desc')
+                );
+                const sSnap = await getDocs(q).catch(err => {
+                    console.warn("Error fetching financial statements:", err);
+                    return { docs: [] };
+                });
+                setStatements(sSnap.docs.map(doc => ({ id: doc.id, ...doc.data() })));
+            }
         } catch (error) {
-            console.warn("Error fetching organizers list:", error);
+            console.warn("Error fetching organizers or statements:", error);
         }
 
         setLoading(false);
@@ -277,6 +384,13 @@ export default function OwnerDashboard() {
         setRefreshing(true);
         await fetchData();
         setRefreshing(false);
+
+        Toast.show({
+            type: 'success',
+            text1: '🔄 Dashboard Refreshed',
+            text2: 'All data is up to date',
+            visibilityTime: 2000,
+        });
     }, []);
 
     const filteredOrganizers = organizers.filter(org =>
@@ -389,26 +503,103 @@ export default function OwnerDashboard() {
                         </Surface>
                     </View>
 
-                    {/* Revenue Card */}
-                    <Surface style={styles.revenueParams} elevation={6}>
-                        <LinearGradient
-                            colors={['#11998e', '#38ef7d']}
-                            start={{ x: 0, y: 0 }}
-                            end={{ x: 1, y: 1 }}
-                            style={styles.revenueCardGradient}
-                        >
-                            <View style={styles.revenueLeft}>
-                                <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 8 }}>
-                                    <MaterialCommunityIcons name="star-four-points" size={16} color="rgba(255,255,255,0.8)" style={{ marginRight: 6 }} />
-                                    <Text style={styles.revenueLabel}>TOTAL REVENUE</Text>
-                                </View>
-                                <Title style={styles.revenueValue}>₹ {totalRevenue.toLocaleString()}</Title>
+                    {/* Revenue Section */}
+                    <Title style={styles.sectionTitle}>Revenue Stats</Title>
+                    <View style={{ flexDirection: 'row', gap: 12, marginBottom: 24 }}>
+                        {/* Paid Revenue Card */}
+                        <Surface style={[styles.revenueCard, { backgroundColor: '#E8F5E9', borderColor: '#C8E6C9' }]} elevation={2}>
+                            <View style={[styles.revenueIconBox, { backgroundColor: '#2E7D32' }]}>
+                                <MaterialCommunityIcons name="cash-check" size={20} color="white" />
                             </View>
-                            <View style={styles.revenueIconContainer}>
-                                <MaterialCommunityIcons name="chart-line-variant" size={48} color="white" style={{ opacity: 0.9 }} />
+                            <View style={{ flex: 1 }}>
+                                <Text style={styles.revenueMiniLabel}>ACTUAL PAID</Text>
+                                <Title style={[styles.revenueValueSmall, { color: '#2E7D32' }]}>₹{totalRevenue.toLocaleString()}</Title>
+                                <Text style={styles.revenueSubtext}>{paidCount} Paid Players</Text>
                             </View>
-                        </LinearGradient>
-                    </Surface>
+                        </Surface>
+
+                        {/* Pending Revenue Card */}
+                        <Surface style={[styles.revenueCard, { backgroundColor: '#FFF3E0', borderColor: '#FFE0B2' }]} elevation={2}>
+                            <View style={[styles.revenueIconBox, { backgroundColor: '#E65100' }]}>
+                                <MaterialCommunityIcons name="cash-clock" size={20} color="white" />
+                            </View>
+                            <View style={{ flex: 1 }}>
+                                <Text style={styles.revenueMiniLabel}>PENDING</Text>
+                                <Title style={[styles.revenueValueSmall, { color: '#E65100' }]}>₹{pendingRevenue.toLocaleString()}</Title>
+                                <Text style={styles.revenueSubtext}>{pendingCount} Awaiting</Text>
+                            </View>
+                        </Surface>
+                    </View>
+
+                    {/* Needs Closure Section */}
+                    {needsEndingTournaments.length > 0 && (
+                        <View style={{ marginBottom: 25 }}>
+                            <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 15 }}>
+                                <View style={{ width: 4, height: 20, backgroundColor: '#EF5350', borderRadius: 2, marginRight: 10 }} />
+                                <Title style={{ fontSize: 18, fontWeight: 'bold', color: '#1a1a1a' }}>Ended - Needs Closure</Title>
+                                <Badge style={{ marginLeft: 10, backgroundColor: '#EF5350' }}>{needsEndingTournaments.length}</Badge>
+                            </View>
+                            {needsEndingTournaments.map((t) => (
+                                <Surface key={t.id} style={[styles.organizerCard, { borderLeftWidth: 4, borderLeftColor: '#EF5350' }]} elevation={2}>
+                                    <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+                                        <View style={{ flex: 1 }}>
+                                            <Text style={{ fontWeight: 'bold', fontSize: 16 }}>{t.name}</Text>
+                                            <Text style={{ color: 'gray', fontSize: 12 }}>{t.gameName} • {t.entryType}</Text>
+                                        </View>
+                                        <Button
+                                            mode="contained"
+                                            buttonColor="#EF5350"
+                                            onPress={() => handleEndTournament(t)}
+                                            labelStyle={{ fontSize: 10, fontWeight: 'bold' }}
+                                            style={{ borderRadius: 8 }}
+                                            compact
+                                        >
+                                            CLOSE & SETTLE
+                                        </Button>
+                                    </View>
+                                    <View style={{ flexDirection: 'row', marginTop: 10, gap: 15 }}>
+                                        <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                                            <MaterialCommunityIcons name="account-group" size={14} color="#666" />
+                                            <Text style={{ fontSize: 12, color: '#666', marginLeft: 4 }}>{t.playerCount || 0} Players</Text>
+                                        </View>
+                                        <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                                            <MaterialCommunityIcons name="clock-outline" size={14} color="#666" />
+                                            <Text style={{ fontSize: 12, color: '#666', marginLeft: 4 }}>Ended on {t.endDate}</Text>
+                                        </View>
+                                    </View>
+                                </Surface>
+                            ))}
+                        </View>
+                    )}
+
+                    {/* Recently Completed Section */}
+                    {completedTournaments.length > 0 && (
+                        <>
+                            <Title style={[styles.sectionTitle, { color: '#E65100' }]}>
+                                <MaterialCommunityIcons name="clock-alert-outline" /> Ready for Settlement
+                            </Title>
+                            {completedTournaments.map((t) => (
+                                <Surface key={t.id} style={[styles.organizerCard, { borderLeftWidth: 4, borderLeftColor: '#E65100' }]} elevation={2}>
+                                    <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
+                                        <View style={{ flex: 1 }}>
+                                            <Text style={{ fontWeight: 'bold', fontSize: 16 }}>{t.name}</Text>
+                                            <Text style={{ color: 'gray', fontSize: 12 }}>{t.gameName} • Ended</Text>
+                                        </View>
+                                        <Button
+                                            mode="contained"
+                                            onPress={() => setActiveTab('financials')}
+                                            compact
+                                            buttonColor="#E65100"
+                                            style={{ borderRadius: 8 }}
+                                        >
+                                            Release ₹
+                                        </Button>
+                                    </View>
+                                </Surface>
+                            ))}
+                            <Divider style={{ marginVertical: 20 }} />
+                        </>
+                    )}
 
                     <Title style={styles.sectionTitle}>Active Tournaments</Title>
                     {activeTournaments.length === 0 ? (
@@ -522,9 +713,32 @@ export default function OwnerDashboard() {
             ) : (
                 <ScrollView
                     contentContainerStyle={styles.content}
-                    refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
+                    refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} colors={['#3F51B5']} />}
                 >
-                    <Title style={styles.sectionTitle}>Pending Payouts</Title>
+                    {/* Financial Summary */}
+                    <Title style={styles.sectionTitle}>Financial Summary</Title>
+                    <View style={styles.summaryGrid}>
+                        <Surface style={styles.summaryBox} elevation={2}>
+                            <Text style={styles.summaryLabel}>Total Collected</Text>
+                            <Text style={[styles.summaryValueSmall, { color: '#1a237e' }]}>
+                                ₹{Math.round(statements.reduce((sum, s) => sum + (s.totalCollected || 0), 0)).toLocaleString('en-IN')}
+                            </Text>
+                        </Surface>
+                        <Surface style={styles.summaryBox} elevation={2}>
+                            <Text style={styles.summaryLabel}>Commission (5%)</Text>
+                            <Text style={[styles.summaryValueSmall, { color: '#1a237e' }]}>
+                                ₹{Math.round(statements.reduce((sum, s) => sum + (s.platformCommission || 0), 0)).toLocaleString('en-IN')}
+                            </Text>
+                        </Surface>
+                        <Surface style={styles.summaryBox} elevation={2}>
+                            <Text style={styles.summaryLabel}>Paid to Org</Text>
+                            <Text style={[styles.summaryValueSmall, { color: '#2e7d32' }]}>
+                                ₹{Math.round(statements.reduce((sum, s) => sum + (s.organizerShare || 0), 0)).toLocaleString('en-IN')}
+                            </Text>
+                        </Surface>
+                    </View>
+
+                    <Title style={[styles.sectionTitle, { marginTop: 20 }]}>Pending Payouts</Title>
                     {completedTournaments.length === 0 ? (
                         <View style={[styles.emptyState, { marginBottom: 20 }]}>
                             <MaterialCommunityIcons name="check-circle-outline" size={40} color="#4CAF50" />
@@ -532,72 +746,111 @@ export default function OwnerDashboard() {
                         </View>
                     ) : (
                         completedTournaments.map((t) => (
-                            <Surface key={t.id} style={styles.organizerCard}>
+                            <Surface key={t.id} style={styles.organizerCard} elevation={1}>
                                 <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 10 }}>
                                     <View>
                                         <Text style={{ fontWeight: 'bold', fontSize: 16 }}>{t.name}</Text>
                                         <Text style={{ color: 'gray', fontSize: 12 }}>{t.gameName}</Text>
                                     </View>
-                                    <Chip icon="account-group" compact>{t.totalPlayers || 0} Players</Chip>
+                                    <Chip icon="account-group" compact style={{ backgroundColor: '#E3F2FD' }}>{t.totalPlayers || 0} Players</Chip>
                                 </View>
                                 <Divider />
                                 <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginTop: 15 }}>
                                     <View>
-                                        <Text style={{ fontSize: 10, color: 'gray', textTransform: 'uppercase' }}>Total Revenue</Text>
-                                        <Text style={{ fontSize: 18, fontWeight: 'bold' }}>₹{t.totalCollections || 0}</Text>
+                                        <Text style={{ fontSize: 10, color: '#666', textTransform: 'uppercase', marginBottom: 4 }}>Revenue</Text>
+                                        <Text style={{ fontSize: 16, fontWeight: 'bold' }}>₹{t.totalCollections || 0}</Text>
                                     </View>
                                     <View>
-                                        <Text style={{ fontSize: 10, color: 'gray', textTransform: 'uppercase' }}>Platform (5%)</Text>
-                                        <Text style={{ fontSize: 18, fontWeight: 'bold', color: theme.colors.secondary }}>₹{Math.floor((t.totalCollections || 0) * 0.05)}</Text>
+                                        <Text style={{ fontSize: 10, color: '#666', textTransform: 'uppercase', marginBottom: 4 }}>Platform (5%)</Text>
+                                        <Text style={{ fontSize: 16, fontWeight: 'bold', color: '#1a237e' }}>₹{Math.floor((t.totalCollections || 0) * 0.05)}</Text>
                                     </View>
                                     <View>
-                                        <Text style={{ fontSize: 10, color: 'gray', textTransform: 'uppercase' }}>Organizer (95%)</Text>
-                                        <Text style={{ fontSize: 18, fontWeight: 'bold', color: theme.colors.primary }}>₹{Math.floor((t.totalCollections || 0) * 0.95)}</Text>
+                                        <Text style={{ fontSize: 10, color: '#666', textTransform: 'uppercase', marginBottom: 4 }}>Organizer (95%)</Text>
+                                        <Text style={{ fontSize: 16, fontWeight: 'bold', color: '#2e7d32' }}>₹{Math.floor((t.totalCollections || 0) * 0.95)}</Text>
                                     </View>
                                 </View>
-                                <Button mode="contained" style={{ marginTop: 20 }} onPress={() => handleReleaseFunds(t)}>Release Funds</Button>
+                                <Button
+                                    mode="contained"
+                                    style={{ marginTop: 20, borderRadius: 12 }}
+                                    onPress={() => router.push(`/(owner)/tournament-settlement/${t.id}`)}
+                                    icon="cash-fast"
+                                >
+                                    Review & Release
+                                </Button>
                             </Surface>
                         ))
                     )}
 
-                    <Title style={[styles.sectionTitle, { marginTop: 30 }]}>Settlement Statement</Title>
-                    {settledTournaments.length === 0 ? (
-                        <View style={styles.emptyState}>
-                            <Text style={{ color: 'gray' }}>No settlement history yet.</Text>
-                        </View>
-                    ) : (
-                        settledTournaments.map((t) => (
-                            <Surface key={t.id} style={[styles.organizerCard, { borderColor: '#4CAF50', borderLeftWidth: 4 }]}>
-                                <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 5 }}>
+                    <Title style={[styles.sectionTitle, { marginTop: 30 }]}>Settlement History</Title>
+                    {(() => {
+                        // Create a unified list of settled records
+                        // 1. Start with actual financial statements
+                        const list = [...statements];
+
+                        // 2. Add tournaments that are marked 'settled' but don't have a statement record yet
+                        settledTournaments.forEach(t => {
+                            const hasStatement = statements.some(s => s.tournamentId === t.id);
+                            if (!hasStatement) {
+                                list.push({
+                                    id: `temp-${t.id}`,
+                                    tournamentId: t.id,
+                                    tournamentName: t.name,
+                                    settlementDate: t.settlementDate || new Date().toISOString(),
+                                    organizerName: "Processing...",
+                                    organizerShare: t.settlementAmount || (t.totalCollections * 0.95),
+                                    platformCommission: (t.totalCollections * 0.05),
+                                    invoiceNumber: "SYNCING",
+                                    transferId: "Pending Confirmation",
+                                    isSyncing: true
+                                });
+                            }
+                        });
+
+                        if (list.length === 0) {
+                            return (
+                                <View style={styles.emptyState}>
+                                    <MaterialCommunityIcons name="history" size={40} color="#ccc" />
+                                    <Text style={{ color: 'gray', marginTop: 5 }}>No settlement history yet.</Text>
+                                </View>
+                            );
+                        }
+
+                        return list.map((s) => (
+                            <Surface key={s.id} style={[styles.organizerCard, { borderLeftWidth: 4, borderLeftColor: s.isSyncing ? '#FF9800' : '#4CAF50' }]} elevation={1}>
+                                <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 8 }}>
+                                    <View style={{ flex: 1 }}>
+                                        <Text style={{ fontWeight: 'bold', fontSize: 16, color: '#1a1a1a' }}>{s.tournamentName}</Text>
+                                        <Text style={{ color: 'gray', fontSize: 12 }}>
+                                            {new Date(s.settlementDate).toLocaleDateString()} • {s.organizerName}
+                                        </Text>
+                                    </View>
+                                    <Chip
+                                        icon={s.isSyncing ? "clock-outline" : "check-decagram"}
+                                        compact
+                                        style={{ backgroundColor: s.isSyncing ? '#FFF3E0' : '#E8F5E9' }}
+                                        textStyle={{ color: s.isSyncing ? '#E65100' : '#2E7D32', fontSize: 10 }}
+                                    >
+                                        {s.isSyncing ? 'SYNCING' : 'SETTLED'}
+                                    </Chip>
+                                </View>
+                                <Divider style={{ marginVertical: 10 }} />
+                                <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
                                     <View>
-                                        <Text style={{ fontWeight: 'bold', fontSize: 16 }}>{t.name}</Text>
-                                        <Text style={{ color: 'gray', fontSize: 12 }}>Completed & Paid</Text>
+                                        <Text style={{ fontSize: 11, color: '#666' }}>Amount Paid</Text>
+                                        <Text style={{ fontSize: 16, fontWeight: 'bold', color: s.isSyncing ? '#666' : '#2E7D32' }}>₹{s.organizerShare?.toLocaleString('en-IN', { minimumFractionDigits: 1, maximumFractionDigits: 2 })}</Text>
                                     </View>
-                                    <Chip icon="check-decagram" compact style={{ backgroundColor: '#E8F5E9' }} textStyle={{ color: '#2E7D32' }}>SETTLED</Chip>
-                                </View>
-                                <View style={{ marginVertical: 10, backgroundColor: '#FAFAFA', padding: 10, borderRadius: 8 }}>
-                                    <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
-                                        <Text style={{ fontSize: 12, color: '#666' }}>Settled Amount:</Text>
-                                        <Text style={{ fontSize: 14, fontWeight: 'bold', color: '#2E7D32' }}>₹{t.settlement?.organizerShare}</Text>
-                                    </View>
-                                    <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginTop: 4 }}>
-                                        <Text style={{ fontSize: 12, color: '#666' }}>Platform Fee (5%):</Text>
-                                        <Text style={{ fontSize: 12 }}>₹{t.settlement?.platformFee}</Text>
-                                    </View>
-                                    <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginTop: 4 }}>
-                                        <Text style={{ fontSize: 12, color: '#666' }}>Settle Date:</Text>
-                                        <Text style={{ fontSize: 12 }}>{t.settlement?.settledAt ? new Date(t.settlement.settledAt).toLocaleDateString() : 'N/A'}</Text>
+                                    <View style={{ alignItems: 'flex-end' }}>
+                                        <Text style={{ fontSize: 11, color: '#666' }}>Commission</Text>
+                                        <Text style={{ fontSize: 16, fontWeight: 'bold', color: '#1a237e' }}>₹{s.platformCommission?.toLocaleString('en-IN', { minimumFractionDigits: 1, maximumFractionDigits: 2 })}</Text>
                                     </View>
                                 </View>
-                                {t.settlement?.transactionId && (
-                                    <View style={{ flexDirection: 'row', alignItems: 'center', backgroundColor: '#F5F5F5', padding: 8, borderRadius: 4 }}>
-                                        <Text style={{ fontSize: 10, color: '#999', flex: 1 }}>TXN ID: {t.settlement.transactionId}</Text>
-                                        <MaterialCommunityIcons name="content-copy" size={14} color="#999" />
-                                    </View>
-                                )}
+                                <View style={{ marginTop: 12, backgroundColor: '#f8f9fa', padding: 8, borderRadius: 8, flexDirection: 'row', justifyContent: 'space-between' }}>
+                                    <Text style={{ fontSize: 10, color: '#666' }}>INV: {s.invoiceNumber}</Text>
+                                    <Text style={{ fontSize: 10, color: '#666' }}>TRF: {s.transferId ? (s.transferId.length > 15 ? s.transferId.substring(0, 15) + '...' : s.transferId) : 'N/A'}</Text>
+                                </View>
                             </Surface>
-                        ))
-                    )}
+                        ));
+                    })()}
                     <View style={{ height: 120 }} />
                 </ScrollView>
             )}
@@ -736,5 +989,65 @@ const styles = StyleSheet.create({
     activeText: { fontSize: 11, color: '#2E7D32', fontWeight: '800', letterSpacing: 0.5 },
     orgFooter: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingTop: 8 },
     emptyState: { alignItems: 'center', marginTop: 40, opacity: 0.6 },
+    // New Revenue Styling
+    revenueCard: {
+        flex: 1,
+        borderRadius: 20,
+        padding: 16,
+        flexDirection: 'row',
+        alignItems: 'center',
+        borderWidth: 1,
+        gap: 12
+    },
+    revenueIconBox: {
+        width: 40,
+        height: 40,
+        borderRadius: 12,
+        justifyContent: 'center',
+        alignItems: 'center'
+    },
+    revenueMiniLabel: {
+        fontSize: 10,
+        fontWeight: '800',
+        color: 'gray',
+        letterSpacing: 0.5,
+        marginBottom: 2
+    },
+    revenueValueSmall: {
+        fontSize: 18,
+        fontWeight: 'bold',
+        lineHeight: 22
+    },
+    revenueSubtext: {
+        fontSize: 9,
+        color: '#666',
+        marginTop: 2
+    },
+    summaryGrid: {
+        flexDirection: 'row',
+        gap: 12,
+        marginBottom: 20
+    },
+    summaryBox: {
+        flex: 1,
+        backgroundColor: 'white',
+        borderRadius: 16,
+        padding: 12,
+        alignItems: 'center',
+        borderWidth: 1,
+        borderColor: '#f0f0f0'
+    },
+    summaryValueSmall: {
+        fontSize: 14,
+        fontWeight: 'bold',
+        marginTop: 4
+    },
+    summaryLabel: {
+        fontSize: 11,
+        color: '#666',
+        fontWeight: '600',
+        textTransform: 'uppercase',
+        letterSpacing: 0.5
+    }
 });
 // End of file

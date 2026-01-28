@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { View, StyleSheet, FlatList, RefreshControl, Alert, Platform } from 'react-native';
-import { Title, Text, Surface, useTheme, Avatar, FAB, Divider, Searchbar, IconButton, Button, Portal, Dialog, Paragraph } from 'react-native-paper';
+import { Title, Text, Surface, useTheme, Avatar, FAB, Divider, Searchbar, IconButton, Button, Portal, Dialog, Paragraph, ActivityIndicator } from 'react-native-paper';
 import { useRouter } from 'expo-router';
 import { collection, query, where, getDocs, deleteDoc, doc } from 'firebase/firestore';
 import { db } from '../../src/config/firebase';
@@ -92,7 +92,7 @@ export default function OrganizersScreen() {
                 <FlatList
                     data={filteredOrganizers}
                     keyExtractor={item => item.id}
-                    refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => { setRefreshing(true); fetchOrganizers(); }} />}
+                    refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => { setRefreshing(true); fetchOrganizers(); }} colors={[theme.colors.primary]} />}
                     renderItem={({ item }) => (
                         <Surface style={styles.card} elevation={1}>
                             <View style={styles.cardHeader}>
@@ -140,18 +140,19 @@ export default function OrganizersScreen() {
                                 >
                                     Assign
                                 </Button>
-                                <Button
-                                    mode="text"
-                                    icon="delete"
-                                    compact
-                                    textColor={theme.colors.error}
-                                    onPress={() => handleDelete(item.id)}
-                                    loading={deletingId === item.id}
-                                    disabled={deletingId === item.id}
-                                    style={{ marginHorizontal: 2 }}
-                                >
-                                    {deletingId === item.id ? "Deleting..." : "Delete"}
-                                </Button>
+                                {deletingId === item.id ? (
+                                    <ActivityIndicator size={20} color={theme.colors.error} style={{ width: 40, alignItems: 'center' }} />
+                                ) : (
+                                    <IconButton
+                                        icon="delete-outline"
+                                        mode="contained"
+                                        containerColor="#FFEBEE"
+                                        iconColor={theme.colors.error}
+                                        size={20}
+                                        onPress={() => handleDelete(item.id)}
+                                        style={{ marginHorizontal: 2 }}
+                                    />
+                                )}
                             </View>
                         </Surface>
                     )}

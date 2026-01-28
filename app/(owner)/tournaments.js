@@ -5,11 +5,35 @@ import { useRouter } from 'expo-router';
 import { collection, getDocs, orderBy, query, getCountFromServer, doc, deleteDoc } from 'firebase/firestore';
 import { db } from '../../src/config/firebase';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
+import { exportTournamentPlayers } from '../../src/services/ExcelExportService';
 
 const TournamentCard = ({ item, onDelete, deletingId }) => {
     const theme = useTheme();
     const router = useRouter();
     const isDeleting = deletingId === item.id;
+
+    // Get status color
+    const getStatusColor = (status) => {
+        switch (status) {
+            case 'upcoming': return '#2196F3';
+            case 'ongoing': return '#4CAF50';
+            case 'completed': return '#757575';
+            default: return '#9C27B0';
+        }
+    };
+
+    const getStatusLabel = (status) => {
+        switch (status) {
+            case 'upcoming': return 'Upcoming';
+            case 'ongoing': return 'Ongoing';
+            case 'completed': return 'Completed';
+            default: return 'Open';
+        }
+    };
+
+    const handleExportPlayers = async (tournamentId, tournamentName) => {
+        await exportTournamentPlayers(tournamentId, tournamentName, db);
+    };
 
     return (
         <Surface style={styles.card} elevation={2}>
@@ -29,7 +53,15 @@ const TournamentCard = ({ item, onDelete, deletingId }) => {
                             {item.organizerEmail ? ` (${item.organizerEmail})` : ''}
                         </Text>
                     </View>
-                    <Chip textStyle={{ fontSize: 10, height: 12, lineHeight: 12 }} style={{ alignSelf: 'flex-start' }}>{item.status || 'Open'}</Chip>
+                    <Chip
+                        textStyle={{ fontSize: 10, height: 12, lineHeight: 12, color: 'white', fontWeight: 'bold' }}
+                        style={{
+                            alignSelf: 'flex-start',
+                            backgroundColor: getStatusColor(item.computedStatus)
+                        }}
+                    >
+                        {getStatusLabel(item.computedStatus)}
+                    </Chip>
                 </View>
 
                 <View style={styles.statsRow}>
@@ -51,30 +83,127 @@ const TournamentCard = ({ item, onDelete, deletingId }) => {
                     </View>
                 </View>
 
+                {/* Transaction & Organizer Details Section */}
+                <View style={styles.detailsSection}>
+                    {/* Organizer Assignment Details */}
+                    <View style={styles.detailCard}>
+                        <View style={styles.detailHeader}>
+                            <MaterialCommunityIcons name="account-tie" size={18} color="#1a237e" />
+                            <Text style={styles.detailTitle}>Organizer Assignment</Text>
+                        </View>
+                        <View style={styles.detailContent}>
+                            <View style={styles.detailRow}>
+                                <Text style={styles.detailLabel}>Name:</Text>
+                                <Text style={styles.detailValue}>{item.organizerName || 'Not Assigned'}</Text>
+                            </View>
+                            {item.organizerEmail && (
+                                <View style={styles.detailRow}>
+                                    <Text style={styles.detailLabel}>Email:</Text>
+                                    <Text style={styles.detailValue}>{item.organizerEmail}</Text>
+                                </View>
+                            )}
+                            {item.organizerId && (
+                                <View style={styles.detailRow}>
+                                    <Text style={styles.detailLabel}>ID:</Text>
+                                    <Text style={[styles.detailValue, { fontFamily: 'monospace', fontSize: 11 }]}>
+                                        {item.organizerId.substring(0, 12)}...
+                                    </Text>
+                                </View>
+                            )}
+                            <View style={styles.detailRow}>
+                                <Text style={styles.detailLabel}>Status:</Text>
+                                <View style={[styles.statusDot, { backgroundColor: item.organizerId ? '#4CAF50' : '#FF9800' }]} />
+                                <Text style={[styles.detailValue, { color: item.organizerId ? '#4CAF50' : '#FF9800', fontWeight: 'bold' }]}>
+                                    {item.organizerId ? 'Assigned' : 'Pending'}
+                                </Text>
+                            </View>
+                        </View>
+                    </View>
+
+                    {/* Transaction Tracking */}
+                    <View style={styles.detailCard}>
+                        <View style={styles.detailHeader}>
+                            <MaterialCommunityIcons name="cash-multiple" size={18} color="#1a237e" />
+                            <Text style={styles.detailTitle}>Transaction Tracking</Text>
+                        </View>
+                        <View style={styles.detailContent}>
+                            <View style={styles.detailRow}>
+                                <Text style={styles.detailLabel}>Total Collected:</Text>
+                                <Text style={[styles.detailValue, { color: '#4CAF50', fontWeight: 'bold' }]}>
+                                    ₹{(item.totalCollections || ((Number(item.entryFee) || 0) * (item.enrolledCount || 0))).toLocaleString('en-IN', { minimumFractionDigits: 1, maximumFractionDigits: 2 })}
+                                </Text>
+                            </View>
+                            <View style={styles.detailRow}>
+                                <Text style={styles.detailLabel}>Platform Fee (5%):</Text>
+                                <Text style={styles.detailValue}>
+                                    ₹{(item.platformCommission || (Math.round((item.totalCollections || ((Number(item.entryFee) || 0) * (item.enrolledCount || 0))) * 0.05 * 100) / 100)).toLocaleString('en-IN', { minimumFractionDigits: 1, maximumFractionDigits: 2 })}
+                                </Text>
+                            </View>
+                            <View style={styles.detailRow}>
+                                <Text style={styles.detailLabel}>Organizer Share:</Text>
+                                <Text style={[styles.detailValue, { color: '#2196F3', fontWeight: 'bold' }]}>
+                                    ₹{(item.organizerShare || (Math.round((item.totalCollections || ((Number(item.entryFee) || 0) * (item.enrolledCount || 0))) * 0.95 * 100) / 100)).toLocaleString('en-IN', { minimumFractionDigits: 1, maximumFractionDigits: 2 })}
+                                </Text>
+                            </View>
+                            <View style={styles.detailRow}>
+                                <Text style={styles.detailLabel}>Paid Players:</Text>
+                                <Text style={styles.detailValue}>{item.paidPlayerCount || item.enrolledCount || 0}</Text>
+                            </View>
+                            <View style={styles.detailRow}>
+                                <Text style={styles.detailLabel}>Payout Status:</Text>
+                                <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                                    <View style={[styles.statusDot, {
+                                        backgroundColor: item.settlementStatus === 'completed' || item.settlementStatus === 'SUCCESS' ? '#4CAF50' :
+                                            (item.settlementStatus === 'processing' || item.settlementStatus === 'PROCESSING' ? '#FF9800' : '#757575')
+                                    }]} />
+                                    <Text style={[styles.detailValue, {
+                                        color: item.settlementStatus === 'completed' || item.settlementStatus === 'SUCCESS' ? '#4CAF50' :
+                                            (item.settlementStatus === 'processing' || item.settlementStatus === 'PROCESSING' ? '#FF9800' : '#757575'),
+                                        fontWeight: 'bold'
+                                    }]}>
+                                        {item.settlementStatus === 'completed' || item.settlementStatus === 'SUCCESS' ? 'Completed' :
+                                            (item.settlementStatus === 'processing' || item.settlementStatus === 'PROCESSING' ? 'Processing' : 'Pending')}
+                                    </Text>
+                                </View>
+                            </View>
+                        </View>
+                    </View>
+                </View>
+
                 <Divider style={{ marginVertical: 10 }} />
 
                 <View style={{ flexDirection: 'row', gap: 10 }}>
-                    <Button
-                        mode="outlined"
-                        icon="pencil"
-                        style={{ flex: 1, borderColor: theme.colors.primary }}
-                        textColor={theme.colors.primary}
-                        onPress={() => router.push({ pathname: '/(owner)/create-tournament', params: { id: item.id } })}
-                        disabled={isDeleting}
-                    >
-                        Edit
-                    </Button>
-                    <Button
-                        mode="outlined"
-                        icon="delete"
-                        style={{ flex: 1, borderColor: theme.colors.error }}
-                        textColor={theme.colors.error}
-                        onPress={() => onDelete(item.id)}
-                        loading={isDeleting}
-                        disabled={isDeleting}
-                    >
-                        {isDeleting ? "Deleting..." : "Delete"}
-                    </Button>
+                    {/* Action Buttons */}
+                    <View style={styles.actionButtons}>
+                        <Button
+                            mode="contained"
+                            icon="pencil"
+                            style={{ flex: 1 }}
+                            onPress={() => router.push(`/(owner)/edit-tournament/${item.id}`)}
+                        >
+                            Edit Tournament
+                        </Button>
+                        <Button
+                            mode="outlined"
+                            icon="microsoft-excel"
+                            style={{ flex: 1, borderColor: '#217346' }}
+                            textColor="#217346"
+                            onPress={() => handleExportPlayers(item.id, item.name)}
+                        >
+                            Export Players
+                        </Button>
+                        <Button
+                            mode="outlined"
+                            icon="delete"
+                            style={{ flex: 1, borderColor: theme.colors.error }}
+                            textColor={theme.colors.error}
+                            onPress={() => onDelete(item.id)}
+                            loading={isDeleting}
+                            disabled={isDeleting}
+                        >
+                            {isDeleting ? "Deleting..." : "Delete"}
+                        </Button>
+                    </View>
                 </View>
             </View>
         </Surface>
@@ -89,6 +218,38 @@ export default function TournamentsScreen() {
     const [searchQuery, setSearchQuery] = useState('');
     const [deletingId, setDeletingId] = useState(null);
     const [confirmDeleteId, setConfirmDeleteId] = useState(null);
+    const [statusFilter, setStatusFilter] = useState('all'); // all, upcoming, ongoing, completed
+
+    // Helper function to determine tournament status
+    const getTournamentStatus = (tournament) => {
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+
+        // Respect manual completion
+        if (tournament.status === 'completed') return 'completed';
+
+        // Parse start date (DD-MM-YYYY format)
+        const parseDate = (dateStr) => {
+            if (!dateStr) return null;
+            const [day, month, year] = dateStr.split('-').map(Number);
+            return new Date(year, month - 1, day);
+        };
+
+        const startDate = parseDate(tournament.startDate);
+        const endDate = parseDate(tournament.endDate);
+
+        if (!startDate) return 'upcoming'; // Default if no date
+
+        if (endDate && today > endDate) {
+            return 'completed';
+        } else if (today >= startDate && (!endDate || today <= endDate)) {
+            return 'ongoing';
+        } else if (today < startDate) {
+            return 'upcoming';
+        }
+
+        return 'upcoming';
+    };
 
     const fetchTournaments = async () => {
         try {
@@ -102,7 +263,11 @@ export default function TournamentsScreen() {
                     const countSnap = await getDocs(collection(db, 'tournaments', doc.id, 'players')).catch(() => ({ size: 0 }));
                     count = countSnap.size;
                 } catch (e) { console.warn("Count error", e); }
-                return { id: doc.id, ...data, enrolledCount: count };
+
+                const tournamentData = { id: doc.id, ...data, enrolledCount: count };
+                tournamentData.computedStatus = getTournamentStatus(tournamentData);
+
+                return tournamentData;
             }));
 
             setTournaments(list);
@@ -117,9 +282,23 @@ export default function TournamentsScreen() {
         fetchTournaments();
     }, []);
 
-    const filtered = tournaments.filter(t =>
-        (t.name || '').toLowerCase().includes(searchQuery.toLowerCase())
-    );
+    // Filter by search query and status
+    const filtered = tournaments.filter(t => {
+        const matchesSearch = (t.name || '').toLowerCase().includes(searchQuery.toLowerCase());
+
+        if (!matchesSearch) return false;
+
+        if (statusFilter === 'all') return true;
+        return t.computedStatus === statusFilter;
+    });
+
+    // Calculate counts for each status
+    const statusCounts = {
+        all: tournaments.length,
+        upcoming: tournaments.filter(t => t.computedStatus === 'upcoming').length,
+        ongoing: tournaments.filter(t => t.computedStatus === 'ongoing').length,
+        completed: tournaments.filter(t => t.computedStatus === 'completed').length
+    };
 
     const executeDelete = async (id) => {
         setDeletingId(id);
@@ -170,10 +349,51 @@ export default function TournamentsScreen() {
                     style={styles.searchBar}
                 />
 
+                {/* Status Filter */}
+                <View style={{ marginBottom: 15 }}>
+                    <Text style={{ fontSize: 12, color: '#666', marginBottom: 8, fontWeight: '600' }}>
+                        Filter by Status
+                    </Text>
+                    <View style={{ flexDirection: 'row', gap: 8, flexWrap: 'wrap' }}>
+                        <Chip
+                            selected={statusFilter === 'all'}
+                            onPress={() => setStatusFilter('all')}
+                            style={{ backgroundColor: statusFilter === 'all' ? theme.colors.primary : '#f5f5f5' }}
+                            textStyle={{ color: statusFilter === 'all' ? 'white' : '#333' }}
+                        >
+                            All ({statusCounts.all})
+                        </Chip>
+                        <Chip
+                            selected={statusFilter === 'upcoming'}
+                            onPress={() => setStatusFilter('upcoming')}
+                            style={{ backgroundColor: statusFilter === 'upcoming' ? '#2196F3' : '#f5f5f5' }}
+                            textStyle={{ color: statusFilter === 'upcoming' ? 'white' : '#333' }}
+                        >
+                            Upcoming ({statusCounts.upcoming})
+                        </Chip>
+                        <Chip
+                            selected={statusFilter === 'ongoing'}
+                            onPress={() => setStatusFilter('ongoing')}
+                            style={{ backgroundColor: statusFilter === 'ongoing' ? '#4CAF50' : '#f5f5f5' }}
+                            textStyle={{ color: statusFilter === 'ongoing' ? 'white' : '#333' }}
+                        >
+                            Ongoing ({statusCounts.ongoing})
+                        </Chip>
+                        <Chip
+                            selected={statusFilter === 'completed'}
+                            onPress={() => setStatusFilter('completed')}
+                            style={{ backgroundColor: statusFilter === 'completed' ? '#757575' : '#f5f5f5' }}
+                            textStyle={{ color: statusFilter === 'completed' ? 'white' : '#333' }}
+                        >
+                            Completed ({statusCounts.completed})
+                        </Chip>
+                    </View>
+                </View>
+
                 <FlatList
                     data={filtered}
                     keyExtractor={item => item.id}
-                    refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => { setRefreshing(true); fetchTournaments(); }} />}
+                    refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => { setRefreshing(true); fetchTournaments(); }} colors={[theme.colors.primary]} />}
                     renderItem={({ item }) => <TournamentCard item={item} onDelete={handleDelete} deletingId={deletingId} />}
                     ListEmptyComponent={<Text style={{ textAlign: 'center', marginTop: 20, color: 'gray' }}>No tournaments found.</Text>}
                 />
@@ -295,5 +515,55 @@ const styles = StyleSheet.create({
         bottom: 0,
         borderRadius: 16,
         elevation: 6
+    },
+
+    // Transaction & Organizer Details Styles
+    detailsSection: {
+        marginTop: 15,
+        gap: 12,
+    },
+    detailCard: {
+        backgroundColor: '#f8f9fa',
+        borderRadius: 12,
+        padding: 12,
+        borderWidth: 1,
+        borderColor: '#e9ecef',
+    },
+    detailHeader: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        marginBottom: 10,
+        gap: 8,
+    },
+    detailTitle: {
+        fontSize: 13,
+        fontWeight: 'bold',
+        color: '#1a237e',
+        textTransform: 'uppercase',
+        letterSpacing: 0.5,
+    },
+    detailContent: {
+        gap: 8,
+    },
+    detailRow: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+    },
+    detailLabel: {
+        fontSize: 12,
+        color: '#666',
+        fontWeight: '500',
+    },
+    detailValue: {
+        fontSize: 12,
+        color: '#333',
+        fontWeight: '600',
+    },
+    statusDot: {
+        width: 8,
+        height: 8,
+        borderRadius: 4,
+        marginRight: 6,
     },
 });

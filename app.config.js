@@ -1,41 +1,38 @@
-export default {
+module.exports = {
     expo: {
         name: "Force Player Register",
         slug: "force-player-register",
         scheme: "fpr",
         version: "1.0.0",
         orientation: "portrait",
-        icon: "./assets/logo.png",
+        icon: "./assets/icon.png",
         userInterfaceStyle: "light",
-        newArchEnabled: true,
         splash: {
-            image: "./assets/logo.png",
+            image: "./assets/splash.png",
             resizeMode: "contain",
             backgroundColor: "#ffffff"
         },
+        assetBundlePatterns: [
+            "**/*"
+        ],
         ios: {
-            supportsTablet: true
+            supportsTablet: true,
+            bundleIdentifier: "com.forcesports.playerregister"
         },
         android: {
             adaptiveIcon: {
-                foregroundImage: "./assets/logo.png",
+                foregroundImage: "./assets/adaptive-icon.png",
                 backgroundColor: "#ffffff"
             },
-            edgeToEdgeEnabled: true,
-            package: "com.forceplayerregister.app"
+            package: "com.forcesports.playerregister"
         },
         web: {
-            favicon: "./assets/logo.png"
+            favicon: "./assets/favicon.png"
         },
-        plugins: [
-            "expo-router",
-            "@react-native-community/datetimepicker"
-        ],
         extra: {
-            razorpayKeyId: process.env.RAZORPAY_KEY_ID || "rzp_test_S45Wn70zYz9AOr", // Updated test key ID
-            eas: {
-                projectId: "5ded0f01-c26b-4f72-9fb7-5e689f5fbb86"
-            }
+            // Environment variables accessible via Constants.expoConfig.extra
+            // This will use the key from .env file (test or live mode)
+            EXPO_PUBLIC_RAZORPAY_KEY_ID: process.env.EXPO_PUBLIC_RAZORPAY_KEY_ID || ""
         }
     }
 };

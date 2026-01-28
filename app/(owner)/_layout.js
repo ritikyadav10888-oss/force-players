@@ -65,6 +65,28 @@ export default function OwnerLayout() {
                     tabBarIcon: ({ color, size }) => <MaterialCommunityIcons name="account-multiple" size={24} color={color} />
                 }}
             />
+            <Tabs.Screen
+                name="transactions"
+                options={{
+                    title: 'Transactions',
+                    tabBarLabel: 'Txns',
+                    tabBarIcon: ({ color, size }) => <MaterialCommunityIcons name="cash-multiple" size={24} color={color} />
+                }}
+            />
+            <Tabs.Screen
+                name="financials"
+                options={{
+                    href: null,
+                    tabBarItemStyle: { display: 'none' }
+                }}
+            />
+            <Tabs.Screen
+                name="tournament-settlement/[id]"
+                options={{
+                    href: null,
+                    tabBarItemStyle: { display: 'none' }
+                }}
+            />
 
             {/* Hide "create" screens from the tab bar but keep them in the stack */}
             <Tabs.Screen
@@ -97,6 +119,13 @@ export default function OwnerLayout() {
             />
             <Tabs.Screen
                 name="tournament-details/[id]"
+                options={{
+                    href: null,
+                    tabBarItemStyle: { display: 'none' }
+                }}
+            />
+            <Tabs.Screen
+                name="edit-tournament/[id]"
                 options={{
                     href: null,
                     tabBarItemStyle: { display: 'none' }

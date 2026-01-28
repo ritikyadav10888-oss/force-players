@@ -7,6 +7,7 @@ import { View, ActivityIndicator, Platform } from 'react-native';
 import { useFonts } from 'expo-font';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { ErrorBoundary } from '../src/components/ErrorBoundary';
+import Toast from 'react-native-toast-message';
 
 // Function to suppress specific web warnings
 if (Platform.OS === 'web') {
@@ -140,6 +141,7 @@ export default function RootLayout() {
                     </AuthProvider>
                 </ErrorBoundary>
             </PaperProvider>
+            <Toast />
         </SafeAreaProvider>
     );
 }

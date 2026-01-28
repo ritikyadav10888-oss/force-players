@@ -5,17 +5,18 @@ const path = require('path');
  * INSTRUCTIONS:
  * 1. Go to Firebase Console > Project Settings > Service Accounts
  * 2. Click "Generate New Private Key"
- * 3. Save the file as "serviceAccountKey.json" in this "scripts" folder
+ * 3. Set GOOGLE_APPLICATION_CREDENTIALS to point to the downloaded JSON key file
  * 4. Add the UIDs of the users you want to make Owners to the array below
  * 5. Run this script: node scripts/setAdminClaims.js
  */
 
 try {
-    const serviceAccount = require("./serviceAccountKey.json");
-
-    admin.initializeApp({
-        credential: admin.credential.cert(serviceAccount)
-    });
+    // SECURITY: Do not load service account keys from a file committed to the repo.
+    // Use Application Default Credentials (ADC) instead.
+    // - Windows PowerShell example:
+    //   $env:GOOGLE_APPLICATION_CREDENTIALS="C:\path\to\serviceAccountKey.json"
+    // - Or run `gcloud auth application-default login`
+    admin.initializeApp({ credential: admin.credential.applicationDefault() });
 
     const setOwnerRole = async (uid) => {
         try {
@@ -46,11 +47,7 @@ try {
         });
 
 } catch (e) {
-    if (e.code === 'MODULE_NOT_FOUND') {
-        console.error("❌ Error: serviceAccountKey.json not found in scripts folder.");
-        console.error("Please download it from Firebase Console and place it here.");
-    } else {
-        console.error("❌ An error occurred:", e.message);
-    }
+    console.error("❌ An error occurred:", e.message);
+    console.error("Tip: set GOOGLE_APPLICATION_CREDENTIALS to a service account JSON or run `gcloud auth application-default login`.");
     process.exit(1);
 }

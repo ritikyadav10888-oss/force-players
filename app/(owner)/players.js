@@ -51,7 +51,7 @@ export default function PlayersScreen() {
                 <FlatList
                     data={filtered}
                     keyExtractor={item => item.id}
-                    refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => { setRefreshing(true); fetchPlayers(); }} />}
+                    refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => { setRefreshing(true); fetchPlayers(); }} colors={[theme.colors.primary]} />}
                     renderItem={({ item }) => (
                         <TouchableOpacity onPress={() => setSelectedPlayer(item)}>
                             <Surface style={styles.card} elevation={1}>

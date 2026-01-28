@@ -1,6 +1,7 @@
 import { initializeApp, getApps, getApp } from "firebase/app";
-import { getAuth } from "firebase/auth";
-import { getFirestore, enableIndexedDbPersistence } from "firebase/firestore";
+import { getAuth, initializeAuth, getReactNativePersistence } from "firebase/auth";
+import ReactNativeAsyncStorage from '@react-native-async-storage/async-storage';
+import { getFirestore, initializeFirestore, persistentLocalCache, persistentMultipleTabManager } from "firebase/firestore";
 import { getStorage } from "firebase/storage";
 import { getFunctions } from "firebase/functions";
 
@@ -8,34 +9,50 @@ import { getFunctions } from "firebase/functions";
 // see the Firebase documentation: https://firebase.google.com/docs/web/setup#access-firebase
 
 const firebaseConfig = {
-    apiKey: "AIzaSyBkvinaYO0DqQPcTm3FGDPE_O7KADBreVQ",
-    authDomain: "force-player-register-ap-ade3a.firebaseapp.com",
-    databaseURL: "https://force-player-register-ap-ade3a-default-rtdb.firebaseio.com",
-    projectId: "force-player-register-ap-ade3a",
-    storageBucket: "force-player-register-ap-ade3a.firebasestorage.app",
-    messagingSenderId: "1099168561002",
-    appId: "1:1099168561002:web:328ea1db5b2fb41f465713",
-    measurementId: "G-83LGLFN70E"
+    apiKey: process.env.EXPO_PUBLIC_FIREBASE_API_KEY,
+    authDomain: process.env.EXPO_PUBLIC_FIREBASE_AUTH_DOMAIN,
+    databaseURL: process.env.EXPO_PUBLIC_FIREBASE_DATABASE_URL,
+    projectId: process.env.EXPO_PUBLIC_FIREBASE_PROJECT_ID,
+    storageBucket: process.env.EXPO_PUBLIC_FIREBASE_STORAGE_BUCKET,
+    messagingSenderId: process.env.EXPO_PUBLIC_FIREBASE_MESSAGING_SENDER_ID,
+    appId: process.env.EXPO_PUBLIC_FIREBASE_APP_ID,
+    measurementId: process.env.EXPO_PUBLIC_FIREBASE_MEASUREMENT_ID
 };
 
 // Initialize Firebase
 const app = !getApps().length ? initializeApp(firebaseConfig) : getApp();
 
 // Initialize Firebase services
-const auth = getAuth(app);
-const db = getFirestore(app);
-
-// Enable offline persistence for Firestore
-if (typeof window !== 'undefined') {
-    enableIndexedDbPersistence(db, {
-        synchronizeTabs: true // Enable multi-tab sync
-    }).catch((err) => {
-        if (err.code === 'failed-precondition') {
-            console.warn('Persistence failed: Multiple tabs open');
-        } else if (err.code === 'unimplemented') {
-            console.warn('Persistence not available in this browser');
-        }
+let auth;
+try {
+    auth = initializeAuth(app, {
+        persistence: getReactNativePersistence(ReactNativeAsyncStorage)
     });
+} catch (e) {
+    // If auth is already initialized, use the existing instance
+    auth = getAuth(app);
+}
+
+// Initialize Firestore with platform-specific persistence
+let db;
+try {
+    // Check if running on web (browser environment)
+    if (typeof window !== 'undefined' && typeof window.localStorage !== 'undefined') {
+        // Web: Use persistent local cache with multi-tab support
+        db = initializeFirestore(app, {
+            localCache: persistentLocalCache({
+                tabManager: persistentMultipleTabManager()
+            })
+        });
+    } else {
+        // React Native: Use default memory cache (IndexedDB not available)
+        db = initializeFirestore(app, {
+            // No cache configuration needed - will use default memory cache
+        });
+    }
+} catch (e) {
+    // Fallback if already initialized
+    db = getFirestore(app);
 }
 
 const storage = getStorage(app);

@@ -27,10 +27,53 @@ export default function OrganizerDashboard() {
     const [uploading, setUploading] = useState(false);
     const [activeTab, setActiveTab] = useState('dashboard');
     const [selectedSportFilter, setSelectedSportFilter] = useState('All');
+    const [selectedStatusFilter, setSelectedStatusFilter] = useState('All');
+    const [payouts, setPayouts] = useState([]);
     const { width } = useWindowDimensions();
     const isMobile = width < 600;
 
-    // Real-time listener for tournaments
+    // Helper function to determine tournament status
+    const getTournamentStatus = (tournament) => {
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+
+        // Respect manual completion and live status
+        if (tournament.status === 'completed') return 'completed';
+        if (tournament.status === 'live') return 'ongoing';
+
+        const parseDate = (dateStr) => {
+            if (!dateStr) return null;
+            // Try standard DD-MM-YYYY format first
+            if (dateStr.includes('-')) {
+                const parts = dateStr.split('-');
+                if (parts.length === 3) {
+                    const [day, month, year] = parts.map(Number);
+                    if (!isNaN(day) && !isNaN(month) && !isNaN(year)) {
+                        return new Date(year, month - 1, day);
+                    }
+                }
+            }
+            // Fallback for standard date strings (e.g. "Tue Jan 20 2026")
+            const d = new Date(dateStr);
+            return isNaN(d.getTime()) ? null : d;
+        };
+
+        const startDate = parseDate(tournament.startDate);
+        const endDate = parseDate(tournament.endDate);
+
+        if (!startDate) return 'upcoming';
+
+        if (endDate && today > endDate) {
+            return 'completed';
+        } else if (today >= startDate && (!endDate || today <= endDate)) {
+            return 'ongoing';
+        } else if (today < startDate) {
+            return 'upcoming';
+        }
+
+        return 'upcoming';
+    };
+
     // Real-time listener for tournaments
     useEffect(() => {
         if (!user || !userData) return;
@@ -67,26 +110,18 @@ export default function OrganizerDashboard() {
                         data.teamCounts = {};
                         data.teamPlayers = {}; // Store players per team
 
-                        console.log('=== TEAM DEBUG ===');
-                        console.log('All Players:', playersList.map(p => ({ name: p.playerName, team: p.teamName, paid: p.paid })));
-                        console.log('Configured Teams:', data.teams);
-
                         if (data.teams) {
                             data.teams.forEach(team => {
                                 const teamName = typeof team === 'string' ? team : team.name;
-                                // Only count PAID members towards the team limit
-                                // Use case-insensitive and trimmed comparison for robustness
                                 const teamMembers = paidPlayers.filter(p => {
                                     const playerTeam = (p.teamName || '').trim().toLowerCase();
                                     const configuredTeam = (teamName || '').trim().toLowerCase();
                                     return playerTeam === configuredTeam;
                                 });
                                 data.teamCounts[teamName] = teamMembers.length;
-                                data.teamPlayers[teamName] = teamMembers; // Store full player list
-                                console.log(`Team: "${teamName}", Count: ${teamMembers.length}, Players:`, teamMembers.map(p => p.playerName));
+                                data.teamPlayers[teamName] = teamMembers;
                             });
                         }
-                        console.log('=================');
                     }
                 } catch (subError) {
                     console.warn(`Could not fetch details for tournament ${d.id}:`, subError);
@@ -94,6 +129,9 @@ export default function OrganizerDashboard() {
                     data.playerCount = 0;
                     data.totalCollected = 0;
                 }
+
+                // Add computed status
+                data.computedStatus = getTournamentStatus(data);
 
                 return data;
             }));
@@ -104,7 +142,16 @@ export default function OrganizerDashboard() {
             setLoading(false);
         });
 
-        return () => unsubscribe();
+        // 2. Real-time listener for payouts (financial_statements)
+        const pQ = query(collection(db, 'financial_statements'), where('organizerId', '==', user.uid));
+        const unsubscribePayouts = Firestore.onSnapshot(pQ, (snap) => {
+            setPayouts(snap.docs.map(doc => ({ id: doc.id, ...doc.data() })));
+        });
+
+        return () => {
+            unsubscribe();
+            unsubscribePayouts();
+        };
     }, [user, userData]);
 
     const openConfigModal = (item) => {
@@ -262,12 +309,31 @@ export default function OrganizerDashboard() {
                             <MaterialCommunityIcons name="crown" size={16} color="#FFD700" />
                             <Text style={styles.prizeValue}>₹{item.winningPrize || '0'}</Text>
                         </Surface>
-                        {item.status === 'live' && (
-                            <Surface style={styles.liveBadge} elevation={2}>
-                                <View style={styles.pulseDot} />
-                                <Text style={styles.liveText}>LIVE</Text>
-                            </Surface>
-                        )}
+
+                        {/* Unified Status Badge */}
+                        <Surface
+                            style={[
+                                styles.statusBadge,
+                                item.computedStatus === 'ongoing' ? styles.liveActionBadge : {},
+                                {
+                                    backgroundColor:
+                                        item.computedStatus === 'completed' ? '#757575' :
+                                            item.computedStatus === 'ongoing' ? '#FFEBEE' : // Red/Pink for Live
+                                                '#2196F3'
+                                }
+                            ]}
+                            elevation={2}
+                        >
+                            {item.computedStatus === 'ongoing' && <View style={styles.pulseDot} />}
+                            <Text style={[
+                                styles.statusText,
+                                item.computedStatus === 'ongoing' ? { color: '#EF5350', fontWeight: '900' } : {}
+                            ]}>
+                                {item.computedStatus === 'completed' ? 'COMPLETED' :
+                                    item.computedStatus === 'ongoing' ? 'LIVE' :
+                                        'UPCOMING'}
+                            </Text>
+                        </Surface>
                     </View>
                     <Title style={styles.cardTitle} numberOfLines={2}>{item.name}</Title>
                     <View style={styles.cardMetaRow}>
@@ -294,15 +360,38 @@ export default function OrganizerDashboard() {
 
             {/* Content Section */}
             <View style={styles.cardContent}>
-                {/* Modern Status Row */}
-                <View style={styles.statusRow}>
-                    <View style={styles.infoBadge}>
-                        <MaterialCommunityIcons name="calendar-clock" size={16} color="#3F51B5" />
-                        <Text style={styles.infoText}>{item.startDate || 'TBA'} {item.startTime ? `• ${item.startTime}` : ''}</Text>
+
+                {/* Timeline Section - Important Dates */}
+                <Surface style={styles.timelineContainer} elevation={0}>
+                    <View style={styles.timelineItem}>
+                        <Text style={styles.timelineLabel}>REGISTRATION ENDS</Text>
+                        <Text style={styles.timelineDate}>
+                            {item.accessExpiryDate ? new Date(item.accessExpiryDate).toLocaleDateString() : 'TBA'}
+                        </Text>
                     </View>
-                    <View style={[styles.infoBadge, { flex: 1, marginLeft: 10 }]}>
+                    <View style={styles.timelineDividerVertical} />
+                    <View style={styles.timelineItem}>
+                        <Text style={styles.timelineLabel}>{item.computedStatus === 'ongoing' ? 'CURRENTLY' : 'STARTS'}</Text>
+                        <Text style={[styles.timelineDate, item.computedStatus === 'ongoing' && { color: '#EF5350', fontSize: 12 }]}>
+                            {item.computedStatus === 'ongoing' ? 'ONGOING' : (item.startDate || 'TBA')}
+                        </Text>
+                    </View>
+                    <View style={styles.timelineDividerVertical} />
+                    <View style={styles.timelineItem}>
+                        <Text style={styles.timelineLabel}>ENDS</Text>
+                        <Text style={styles.timelineDate}>{item.endDate || 'TBA'}</Text>
+                    </View>
+                </Surface>
+
+                {/* Location Row (replaces old Status Row which had duplicate date) */}
+                <View style={styles.statusRow}>
+                    <View style={[styles.infoBadge, { flex: 1 }]}>
                         <MaterialCommunityIcons name="map-marker" size={16} color="#E91E63" />
                         <Text style={styles.infoText} numberOfLines={1}>{item.address || 'Venue TBA'}</Text>
+                    </View>
+                    <View style={[styles.infoBadge, { marginLeft: 10 }]}>
+                        <MaterialCommunityIcons name="clock-outline" size={16} color="#3F51B5" />
+                        <Text style={styles.infoText}>{item.startTime || 'Time TBA'}</Text>
                     </View>
                 </View>
 
@@ -431,6 +520,46 @@ export default function OrganizerDashboard() {
                                 );
                             })}
                         </ScrollView>
+                    </View>
+                )}
+
+                {/* Settlement Info for Completed Tournaments */}
+                {item.computedStatus === 'completed' && (
+                    <View style={{ marginTop: 15 }}>
+                        <Divider style={{ marginBottom: 15 }} />
+                        <Title style={[styles.sectionHeading, { color: '#1A237E' }]}>Settlement Status</Title>
+                        {(() => {
+                            const payout = payouts.find(p => p.tournamentId === item.id);
+                            if (payout) {
+                                return (
+                                    <Surface style={{ padding: 12, borderRadius: 12, backgroundColor: '#E8F5E9', borderWidth: 1, borderColor: '#A5D6A7' }} elevation={0}>
+                                        <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+                                            <View>
+                                                <Text style={{ fontSize: 10, color: '#2E7D32', fontWeight: 'bold' }}>AMOUNT PAID</Text>
+                                                <Text style={{ fontSize: 18, fontWeight: 'bold', color: '#1B5E20' }}>₹{Math.round(payout.organizerShare).toLocaleString()}</Text>
+                                            </View>
+                                            <Chip icon="check-decagram" compact style={{ backgroundColor: '#1B5E20' }} textStyle={{ color: 'white', fontSize: 10 }}>SETTLED</Chip>
+                                        </View>
+                                        <View style={{ marginTop: 8, flexDirection: 'row', justifyContent: 'space-between' }}>
+                                            <Text style={{ fontSize: 10, color: '#666' }}>ID: {payout.invoiceNumber}</Text>
+                                            <Text style={{ fontSize: 10, color: '#666' }}>DATE: {new Date(payout.settlementDate).toLocaleDateString()}</Text>
+                                        </View>
+                                    </Surface>
+                                );
+                            } else {
+                                return (
+                                    <Surface style={{ padding: 12, borderRadius: 12, backgroundColor: '#FFF3E0', borderWidth: 1, borderColor: '#FFE0B2' }} elevation={0}>
+                                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+                                            <MaterialCommunityIcons name="clock-outline" size={20} color="#E65100" />
+                                            <View>
+                                                <Text style={{ fontSize: 14, fontWeight: 'bold', color: '#E65100' }}>Settlement Processing</Text>
+                                                <Text style={{ fontSize: 11, color: '#666' }}>Funds are being calculated & verified by owner.</Text>
+                                            </View>
+                                        </View>
+                                    </Surface>
+                                );
+                            }
+                        })()}
                     </View>
                 )}
 
@@ -736,6 +865,51 @@ export default function OrganizerDashboard() {
                                             )
                                         );
                                     })()}
+
+                                    <Text style={styles.sectionHeadingAlt}>Settlement History</Text>
+                                    {(() => {
+                                        // Unified payout list
+                                        const list = [...payouts];
+
+                                        // Add settled tournaments that don't have a record in financial_statements yet
+                                        tournaments.forEach(t => {
+                                            if (t.settlementStatus === 'completed') {
+                                                const hasRecord = payouts.some(p => p.tournamentId === t.id);
+                                                if (!hasRecord) {
+                                                    list.push({
+                                                        id: `temp-${t.id}`,
+                                                        tournamentName: t.name,
+                                                        settlementDate: new Date().toISOString(),
+                                                        organizerShare: t.totalCollected * 0.95,
+                                                        invoiceNumber: 'SYNCING',
+                                                        isSyncing: true
+                                                    });
+                                                }
+                                            }
+                                        });
+
+                                        if (list.length === 0) {
+                                            return (
+                                                <View style={styles.emptyActivity}>
+                                                    <Text style={styles.emptyText}>No settlements received yet.</Text>
+                                                </View>
+                                            );
+                                        }
+
+                                        return list.map((p, i) => (
+                                            <Surface key={i} style={[styles.transactionItem, { borderLeftWidth: 4, borderLeftColor: p.isSyncing ? '#FF9800' : '#4CAF50' }]} elevation={1}>
+                                                <Avatar.Icon size={40} icon={p.isSyncing ? "clock-sync" : "bank-transfer-in"} style={{ backgroundColor: p.isSyncing ? '#FFF3E0' : '#E8F5E9' }} color={p.isSyncing ? '#E65100' : '#2E7D32'} />
+                                                <View style={{ marginLeft: 12, flex: 1 }}>
+                                                    <Text style={styles.txnName}>{p.tournamentName}</Text>
+                                                    <Text style={styles.txnDate}>{new Date(p.settlementDate).toLocaleDateString()} • {p.invoiceNumber}</Text>
+                                                </View>
+                                                <View style={{ alignItems: 'flex-end' }}>
+                                                    <Text style={[styles.txnAmount, { color: p.isSyncing ? '#E65100' : '#2E7D32' }]}>₹{Math.round(p.organizerShare).toLocaleString()}</Text>
+                                                    <Chip compact style={{ backgroundColor: p.isSyncing ? '#FFF3E0' : '#E8F5E9', height: 20 }} textStyle={{ fontSize: 8, color: p.isSyncing ? '#E65100' : '#2E7D32' }}>{p.isSyncing ? 'SYNCING' : 'SETTLED'}</Chip>
+                                                </View>
+                                            </Surface>
+                                        ));
+                                    })()}
                                 </>
                             );
                         })()}
@@ -743,45 +917,75 @@ export default function OrganizerDashboard() {
                 ) : (
                     /* Dashboard View - Tournament List */
                     <FlatList
-                        data={tournaments}
+                        data={tournaments.filter(t => selectedStatusFilter === 'All' || t.computedStatus === selectedStatusFilter.toLowerCase())}
                         renderItem={renderItem}
                         keyExtractor={item => item.id}
                         ListHeaderComponent={
-                            !loading && tournaments.length > 0 && user ? (
-                                <Surface style={styles.masterShareCard} elevation={5}>
-                                    <View style={styles.masterHeader}>
-                                        <LinearGradient
-                                            colors={['#3F51B5', '#1A237E']}
-                                            style={styles.masterIconCircle}
-                                        >
-                                            <MaterialCommunityIcons name="share-variant" size={22} color="white" />
-                                        </LinearGradient>
-                                        <View style={{ marginLeft: 15, flex: 1 }}>
-                                            <Text style={styles.masterTitle}>Share Professional Profile</Text>
-                                            <Text style={styles.masterSubtitle}>Enable players to view all your tournaments at once</Text>
+                            <View>
+                                {!loading && tournaments.length > 0 && user ? (
+                                    <Surface style={styles.masterShareCard} elevation={5}>
+                                        <View style={styles.masterHeader}>
+                                            <LinearGradient
+                                                colors={['#3F51B5', '#1A237E']}
+                                                style={styles.masterIconCircle}
+                                            >
+                                                <MaterialCommunityIcons name="share-variant" size={22} color="white" />
+                                            </LinearGradient>
+                                            <View style={{ marginLeft: 15, flex: 1 }}>
+                                                <Text style={styles.masterTitle}>Share Professional Profile</Text>
+                                                <Text style={styles.masterSubtitle}>Enable players to view all your tournaments at once</Text>
+                                            </View>
+                                            <TouchableOpacity
+                                                onPress={() => shareToWhatsApp(user?.uid, 'My Profile', true)}
+                                                style={styles.whatsappIconCircle}
+                                            >
+                                                <MaterialCommunityIcons name="whatsapp" size={24} color="#25D366" />
+                                            </TouchableOpacity>
                                         </View>
-                                        <TouchableOpacity
-                                            onPress={() => shareToWhatsApp(user?.uid, 'My Profile', true)}
-                                            style={styles.whatsappIconCircle}
-                                        >
-                                            <MaterialCommunityIcons name="whatsapp" size={24} color="#25D366" />
-                                        </TouchableOpacity>
+                                        <View style={styles.masterLinkContainer}>
+                                            <MaterialCommunityIcons name="link-variant" size={16} color="#757575" style={{ marginRight: 8 }} />
+                                            <Text style={styles.masterLinkText} numberOfLines={1}>
+                                                {Platform.OS === 'web' ? window.location.origin : 'https://force-player-register-ap-ade3a.web.app'}/organizer/{user?.uid}
+                                            </Text>
+                                            <TouchableOpacity
+                                                style={styles.masterCopyAction}
+                                                onPress={() => handleShare(user?.uid, 'My Profile', true)}
+                                            >
+                                                <MaterialCommunityIcons name="content-copy" size={18} color="#1A237E" />
+                                                <Text style={styles.copyText}>COPY</Text>
+                                            </TouchableOpacity>
+                                        </View>
+                                    </Surface>
+                                ) : null}
+
+                                {/* Status Filter Chips */}
+                                {!loading && tournaments.length > 0 && (
+                                    <View style={{ paddingHorizontal: 20, marginBottom: 15 }}>
+                                        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 8 }}>
+                                            {['All', 'Upcoming', 'Ongoing', 'Completed'].map((status) => (
+                                                <Chip
+                                                    key={status}
+                                                    mode="outlined"
+                                                    selected={selectedStatusFilter === status}
+                                                    onPress={() => setSelectedStatusFilter(status)}
+                                                    style={{
+                                                        backgroundColor: selectedStatusFilter === status ? '#E8EAF6' : 'white',
+                                                        borderColor: selectedStatusFilter === status ? '#1A237E' : '#E0E0E0',
+                                                    }}
+                                                    textStyle={{
+                                                        color: selectedStatusFilter === status ? '#1A237E' : '#64748B',
+                                                        fontWeight: 'bold',
+                                                        fontSize: 11
+                                                    }}
+                                                    showSelectedOverlay={true}
+                                                >
+                                                    {status === 'Completed' ? 'ENDED' : status.toUpperCase()}
+                                                </Chip>
+                                            ))}
+                                        </ScrollView>
                                     </View>
-                                    <View style={styles.masterLinkContainer}>
-                                        <MaterialCommunityIcons name="link-variant" size={16} color="#757575" style={{ marginRight: 8 }} />
-                                        <Text style={styles.masterLinkText} numberOfLines={1}>
-                                            {Platform.OS === 'web' ? window.location.origin : 'https://force-player-register-ap-ade3a.web.app'}/organizer/{user?.uid}
-                                        </Text>
-                                        <TouchableOpacity
-                                            style={styles.masterCopyAction}
-                                            onPress={() => handleShare(user?.uid, 'My Profile', true)}
-                                        >
-                                            <MaterialCommunityIcons name="content-copy" size={18} color="#1A237E" />
-                                            <Text style={styles.copyText}>COPY</Text>
-                                        </TouchableOpacity>
-                                    </View>
-                                </Surface>
-                            ) : null
+                                )}
+                            </View>
                         }
                         contentContainerStyle={{ paddingBottom: 20 }}
                         showsVerticalScrollIndicator={false}
@@ -789,7 +993,11 @@ export default function OrganizerDashboard() {
                             <View style={styles.emptyContainer}>
                                 <MaterialCommunityIcons name="clipboard-text-off-outline" size={60} color="#ccc" />
                                 <Title style={{ color: 'gray', marginTop: 10 }}>No Tournaments Found</Title>
-                                <Text style={{ color: 'gray' }}>You haven't been assigned any tournaments yet.</Text>
+                                <Text style={{ color: 'gray' }}>
+                                    {selectedStatusFilter !== 'All'
+                                        ? `No ${selectedStatusFilter.toLowerCase()} tournaments found.`
+                                        : "You haven't been assigned any tournaments yet."}
+                                </Text>
                             </View>
                         }
                     />
@@ -976,4 +1184,25 @@ const styles = StyleSheet.create({
     configItem: { flexDirection: 'row', alignItems: 'center', padding: 12, marginBottom: 12, borderRadius: 16, backgroundColor: '#F8FAFC' },
     logoPicker: { width: 56, height: 56, borderRadius: 28, backgroundColor: '#EDF2F7', justifyContent: 'center', alignItems: 'center', overflow: 'hidden', borderWidth: 2, borderColor: 'white' },
     configuredLogo: { width: '100%', height: '100%' },
+
+    // Tournament Status Badge
+    statusBadge: {
+        paddingHorizontal: 12,
+        paddingVertical: 6,
+        borderRadius: 12,
+        marginLeft: 8,
+    },
+    statusText: {
+        color: 'white',
+        fontSize: 10,
+        fontWeight: 'bold',
+        letterSpacing: 0.5,
+    },
+
+    // Timeline Styles
+    timelineContainer: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', backgroundColor: '#F8FAFC', padding: 12, borderRadius: 12, marginBottom: 12, borderWidth: 1, borderColor: '#EDF2F7' },
+    timelineItem: { flex: 1, alignItems: 'center' },
+    timelineLabel: { fontSize: 8, color: '#94A3B8', fontWeight: 'bold', letterSpacing: 0.5, marginBottom: 4 },
+    timelineDate: { fontSize: 11, color: '#334155', fontWeight: '800' },
+    timelineDividerVertical: { width: 1, height: '80%', backgroundColor: '#E2E8F0' },
 });

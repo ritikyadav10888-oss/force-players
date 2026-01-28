@@ -1,406 +1,1323 @@
 const functions = require('firebase-functions');
-const { onCall } = require("firebase-functions/v2/https");
-const { HttpsError } = require("firebase-functions/v2/https");
+const { onCall, HttpsError } = require("firebase-functions/v2/https");
+const { onRequest } = require("firebase-functions/v2/https");
 const admin = require('firebase-admin');
 const crypto = require('crypto');
-const fs = require('fs');
-const path = require('path');
 
 admin.initializeApp();
 const db = admin.firestore();
+const Razorpay = require('razorpay');
 
-// 💡 Secret from your Razorpay Dashboard > Settings > Webhooks
-// Set it via CLI: firebase functions:secrets:set RAZORPAY_SECRET
+/**
+ * Razorpay Initialization
+ * Secrets must be set: firebase functions:secrets:set RAZORPAY_KEY_ID RAZORPAY_KEY_SECRET
+ */
+const getRazorpayInstance = (secrets) => {
+    return new Razorpay({
+        key_id: secrets.RAZORPAY_KEY_ID,
+        key_secret: secrets.RAZORPAY_KEY_SECRET,
+    });
+};
 
+/**
+ * Create Razorpay Linked Account for Organizer (Route)
+ */
+const createLinkedAccount = async (organizerData, secrets) => {
+    const cleanId = secrets.RAZORPAY_KEY_ID?.trim();
+    const cleanSecret = secrets.RAZORPAY_KEY_SECRET?.trim();
+    const auth = Buffer.from(`${cleanId}:${cleanSecret}`).toString('base64');
 
-exports.razorpayWebhook = functions.https.onRequest(
-    { secrets: ["RAZORPAY_SECRET"] },
+    console.log(`🔗 Creating linked account for: ${organizerData.name}`);
+
+    // Step 1: Create linked account
+    const accountResponse = await fetch('https://api.razorpay.com/v1/accounts', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Basic ${auth}`
+        },
+        body: JSON.stringify({
+            email: organizerData.email,
+            phone: organizerData.phone,
+            type: 'route',
+            legal_business_name: organizerData.name,
+            business_type: 'individual',
+            contact_name: organizerData.name,
+            reference_id: organizerData.uid
+        })
+    });
+
+    if (!accountResponse.ok) {
+        const error = await accountResponse.json().catch(() => ({}));
+        console.error(`❌ Account creation error:`, JSON.stringify(error));
+        throw new Error(error.error?.description || 'Failed to create linked account');
+    }
+
+    const account = await accountResponse.json();
+    console.log(`✅ Linked account created: ${account.id}`);
+
+    // Step 2: Add bank account details
+    const stakeholderResponse = await fetch(`https://api.razorpay.com/v1/accounts/${account.id}/stakeholders`, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Basic ${auth}`
+        },
+        body: JSON.stringify({
+            bank_account: {
+                ifsc: organizerData.bankDetails.ifsc.trim().toUpperCase(),
+                account_number: String(organizerData.bankDetails.accountNumber).replace(/[^a-zA-Z0-9]/g, ''),
+                beneficiary_name: organizerData.name
+            }
+        })
+    });
+
+    if (!stakeholderResponse.ok) {
+        const error = await stakeholderResponse.json().catch(() => ({}));
+        console.error(`❌ Bank account addition error:`, JSON.stringify(error));
+        throw new Error(error.error?.description || 'Failed to add bank account');
+    }
+
+    console.log(`✅ Bank account added to linked account`);
+    return account;
+};
+
+/**
+ * Unified Razorpay Webhook (Payments + Route Transfers)
+ */
+exports.razorpayWebhook = onRequest(
+    { secrets: ["RAZORPAY_WEBHOOK_SECRET", "RAZORPAY_KEY_ID", "RAZORPAY_KEY_SECRET"] },
     async (req, res) => {
-        const RAZORPAY_WEBHOOK_SECRET = process.env.RAZORPAY_SECRET;
-
-
-        // Only allow POST requests
-
-        if (req.method !== 'POST') {
-            return res.status(405).send('Method Not Allowed');
-        }
-
         const signature = req.headers['x-razorpay-signature'];
-
-        // 1. Verify Signature (Security Check)
-        // CRITICAL: Use req.rawBody instead of JSON.stringify(req.body) to avoid payload mismatch
         const body = req.rawBody;
 
         if (!body) {
-            console.error('❌ Missing request body');
             return res.status(400).send('Missing body');
         }
 
-        const expectedSignature = crypto
-            .createHmac('sha256', RAZORPAY_WEBHOOK_SECRET)
-            .update(body)
-            .digest('hex');
+        const RAZORPAY_WEBHOOK_SECRET = process.env.RAZORPAY_WEBHOOK_SECRET;
 
-        if (signature !== expectedSignature) {
-            console.error('❌ Invalid Razorpay Signature');
+        // Signature Verification
+        let isValid = false;
+        try {
+            if (RAZORPAY_WEBHOOK_SECRET) {
+                isValid = Razorpay.validateWebhookSignature(body.toString(), signature, RAZORPAY_WEBHOOK_SECRET);
+            }
+        } catch (err) {
+            console.error('❌ Verification error:', err.message);
+        }
+
+        if (!isValid) {
+            console.error('❌ Signature mismatch');
             return res.status(400).send('Invalid Signature');
         }
 
         const event = req.body.event;
-        const payload = req.body.payload.payment.entity;
+        const payload = req.body.payload;
 
-        console.log(`🔔 Received event: ${event}`);
+        console.log(`🔔 Event: ${event}`);
 
-        // 2. Handle successful payment
-        if (event === 'payment.captured' || event === 'order.paid' || event === 'payment.authorized') {
-            // We pass these in 'notes' from the frontend
-            const { tournamentId, playerId } = payload.notes || {};
+        // Handle Payment Events
+        if (event.startsWith('payment.') || event.startsWith('order.') || event.startsWith('invoice.')) {
+            const entity = payload.payment ? payload.payment.entity : (payload.order ? payload.order.entity : (payload.invoice ? payload.invoice.entity : null));
+            if (!entity) return res.status(200).send('No entity');
 
-            if (tournamentId && playerId) {
-                try {
-                    // 3. Update Firestore securely
-                    const tournamentRef = db.collection('tournaments').doc(tournamentId);
-                    const playerRef = tournamentRef.collection('players').doc(playerId);
-
-                    await db.runTransaction(async (transaction) => {
-                        const playerDoc = await transaction.get(playerRef);
-                        if (!playerDoc.exists) return;
-
-                        if (!playerDoc.data().paid) {
-                            transaction.update(playerRef, {
-                                paid: true,
-                                paymentId: payload.id,
-                                orderId: payload.order_id,
-                                method: payload.method,
-                                paidAmount: payload.amount / 100, // Save precise amount
-                                paidAt: admin.firestore.FieldValue.serverTimestamp()
-                            });
-
-                            // Increment total collections
-                            transaction.update(tournamentRef, {
-                                totalCollections: admin.firestore.FieldValue.increment(payload.amount / 100)
-                            });
-                        }
-                    });
-
-                    console.log(`✅ Payment verified & updated for player ${playerId} in tournament ${tournamentId}`);
-
-                    // 4. Send Payment Confirmation Email via Firebase Extension
+            if (event === 'payment.captured' || event === 'order.paid' || event === 'payment.authorized') {
+                const { tournamentId, playerId } = entity.notes || {};
+                if (tournamentId && playerId) {
                     try {
-                        const playerDoc = await playerRef.get();
-                        const tournamentDoc = await tournamentRef.get();
+                        const tournamentRef = db.collection('tournaments').doc(tournamentId);
+                        const playerRef = tournamentRef.collection('players').doc(playerId);
 
-                        if (playerDoc.exists && tournamentDoc.exists) {
-                            const playerData = playerDoc.data();
-                            const tournamentData = tournamentDoc.data();
+                        await db.runTransaction(async (transaction) => {
+                            const playerDoc = await transaction.get(playerRef);
+                            const tournamentDoc = await transaction.get(tournamentRef);
 
-                            // Prepare email data for Firebase Extension
-                            const emailData = {
-                                to: playerData.email,
-                                message: {
-                                    subject: `Payment Confirmation - ${tournamentData.name}`,
-                                    html: `
-                                        <!DOCTYPE html>
-                                        <html>
-                                        <head>
-                                            <meta charset="UTF-8">
-                                            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-                                        </head>
-                                        <body style="margin: 0; padding: 0; font-family: 'Segoe UI', Arial, sans-serif; background-color: #f5f5f5;">
-                                            <table width="100%" cellpadding="0" cellspacing="0" style="background-color: #f5f5f5; padding: 40px 20px;">
-                                                <tr>
-                                                    <td align="center">
-                                                        <table width="600" cellpadding="0" cellspacing="0" style="background-color: #ffffff; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 12px rgba(0,0,0,0.1);">
-                                                            <!-- Header -->
-                                                            <tr>
-                                                                <td style="background: linear-gradient(135deg, #00C853 0%, #00E676 100%); padding: 40px 30px; text-align: center;">
-                                                                    <div style="width: 80px; height: 80px; background-color: white; border-radius: 50%; margin: 0 auto 20px; display: inline-flex; align-items: center; justify-content: center;">
-                                                                        <span style="font-size: 40px;">💳</span>
-                                                                    </div>
-                                                                    <h1 style="color: white; margin: 0; font-size: 28px; font-weight: 600;">Payment Received!</h1>
-                                                                    <p style="color: rgba(255,255,255,0.9); margin: 10px 0 0 0; font-size: 16px;">Thank you for your payment</p>
-                                                                </td>
-                                                            </tr>
-                                                            <!-- Content -->
-                                                            <tr>
-                                                                <td style="padding: 40px 30px;">
-                                                                    <p style="color: #333; font-size: 16px; line-height: 1.6; margin: 0 0 20px 0;">
-                                                                        Hello <strong>${playerData.name || 'Player'}</strong>,
-                                                                    </p>
-                                                                    <p style="color: #333; font-size: 16px; line-height: 1.6; margin: 0 0 30px 0;">
-                                                                        We've successfully received your payment for <strong>${tournamentData.name}</strong>. Your spot is now confirmed!
-                                                                    </p>
-                                                                    <!-- Payment Receipt Box -->
-                                                                    <div style="background: linear-gradient(135deg, #f5f7fa 0%, #e8ecf1 100%); border-radius: 12px; padding: 25px; margin: 30px 0; border: 2px solid #00C853;">
-                                                                        <h3 style="color: #1a237e; margin: 0 0 20px 0; font-size: 18px; text-align: center;">🧾 Payment Receipt</h3>
-                                                                        <table width="100%" cellpadding="10" cellspacing="0">
-                                                                            <tr>
-                                                                                <td style="color: #666; font-size: 14px; font-weight: 600; width: 50%;">Transaction ID:</td>
-                                                                                <td style="color: #333; font-size: 14px; font-family: 'Courier New', monospace; text-align: right;">${payload.id}</td>
-                                                                            </tr>
-                                                                            <tr>
-                                                                                <td style="color: #666; font-size: 14px; font-weight: 600;">Payment Method:</td>
-                                                                                <td style="color: #333; font-size: 14px; text-align: right;">${payload.method.toUpperCase()}</td>
-                                                                            </tr>
-                                                                            <tr>
-                                                                                <td style="color: #666; font-size: 14px; font-weight: 600;">Date & Time:</td>
-                                                                                <td style="color: #333; font-size: 14px; text-align: right;">${new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}</td>
-                                                                            </tr>
-                                                                            <tr style="border-top: 2px solid #e0e0e0;">
-                                                                                <td style="color: #1a237e; font-size: 16px; font-weight: 700; padding-top: 15px;">Amount Paid:</td>
-                                                                                <td style="color: #00C853; font-size: 18px; font-weight: 700; text-align: right; padding-top: 15px;">₹${(payload.amount / 100).toFixed(2)}</td>
-                                                                            </tr>
-                                                                        </table>
-                                                                    </div>
-                                                                    <!-- Success Message -->
-                                                                    <div style="background-color: #e8f5e9; border-left: 4px solid #4CAF50; padding: 15px; margin: 20px 0; border-radius: 4px;">
-                                                                        <p style="color: #2e7d32; font-size: 14px; margin: 0; line-height: 1.6;">
-                                                                            <strong>✅ Status:</strong> Payment Confirmed<br>
-                                                                            Your registration is now complete and your spot is secured!
-                                                                        </p>
-                                                                    </div>
-                                                                    <!-- Tournament Info -->
-                                                                    <h3 style="color: #1a237e; margin: 30px 0 15px 0; font-size: 18px;">🎮 Tournament Information</h3>
-                                                                    <table width="100%" cellpadding="8" cellspacing="0" style="background-color: #f9f9f9; border-radius: 8px;">
-                                                                        <tr>
-                                                                            <td style="color: #666; font-size: 14px; padding: 10px;">📋 Tournament:</td>
-                                                                            <td style="color: #333; font-size: 14px; font-weight: 600; padding: 10px;">${tournamentData.name}</td>
-                                                                        </tr>
-                                                                        <tr>
-                                                                            <td style="color: #666; font-size: 14px; padding: 10px;">🎮 Game:</td>
-                                                                            <td style="color: #333; font-size: 14px; font-weight: 600; padding: 10px;">${tournamentData.gameName || 'TBA'}</td>
-                                                                        </tr>
-                                                                        <tr>
-                                                                            <td style="color: #666; font-size: 14px; padding: 10px;">📅 Date:</td>
-                                                                            <td style="color: #333; font-size: 14px; font-weight: 600; padding: 10px;">${tournamentData.startDate || 'TBA'}</td>
-                                                                        </tr>
-                                                                        <tr>
-                                                                            <td style="color: #666; font-size: 14px; padding: 10px;">📍 Venue:</td>
-                                                                            <td style="color: #333; font-size: 14px; font-weight: 600; padding: 10px;">${tournamentData.venue || 'TBA'}</td>
-                                                                        </tr>
-                                                                    </table>
-                                                                    <p style="color: #666; font-size: 13px; line-height: 1.6; margin: 20px 0 0 0; text-align: center; font-style: italic;">
-                                                                        Keep this email for your records. You may need to show this receipt at the tournament venue.
-                                                                    </p>
-                                                                    <p style="color: #333; font-size: 16px; line-height: 1.6; margin: 30px 0 10px 0;">
-                                                                        See you at the tournament!
-                                                                    </p>
-                                                                    <p style="color: #333; font-size: 16px; line-height: 1.6; margin: 0;">
-                                                                        <strong>Force Player Register Team</strong>
-                                                                    </p>
-                                                                </td>
-                                                            </tr>
-                                                            <!-- Footer -->
-                                                            <tr>
-                                                                <td style="background-color: #f8f9fa; padding: 30px; text-align: center; border-top: 1px solid #e0e0e0;">
-                                                                    <p style="color: #666; font-size: 14px; margin: 0 0 10px 0; font-weight: 600;">Force Player Register</p>
-                                                                    <p style="color: #999; font-size: 12px; margin: 0 0 15px 0;">Tournament Management System</p>
-                                                                    <p style="color: #999; font-size: 11px; margin: 0; line-height: 1.5;">© 2026 Force Player Register. All rights reserved.</p>
-                                                                </td>
-                                                            </tr>
-                                                        </table>
-                                                    </td>
-                                                </tr>
-                                            </table>
-                                        </body>
-                                        </html>
-                                    `
+                            if (!playerDoc.exists) return;
+                            if (!playerDoc.data().paid) {
+                                // AUTO-CAPTURE LOGIC: If payment is only authorized, capture it first
+                                if (event === 'payment.authorized') {
+                                    try {
+                                        const rzp = getRazorpayInstance({
+                                            RAZORPAY_KEY_ID: process.env.RAZORPAY_KEY_ID,
+                                            RAZORPAY_KEY_SECRET: process.env.RAZORPAY_KEY_SECRET
+                                        });
+                                        console.log(`🎯 Auto-capturing payment: ${entity.id}`);
+                                        await rzp.payments.capture(entity.id, entity.amount, entity.currency || 'INR');
+                                        console.log(`✅ Payment ${entity.id} captured successfully`);
+                                    } catch (captureErr) {
+                                        console.error(`❌ Capture Failed for ${entity.id}:`, captureErr.message);
+                                        if (!captureErr.message?.includes('already been captured')) {
+                                            throw new Error("Capture failed, rolling back transaction");
+                                        }
+                                    }
                                 }
-                            };
 
-                            // Write to mail collection to trigger email
-                            await db.collection('mail').add(emailData);
-                            console.log(`✅ Payment confirmation email queued for ${playerData.email}`);
-                        }
-                    } catch (emailError) {
-                        console.error('❌ Failed to queue payment confirmation email:', emailError);
-                    }
+                                transaction.update(playerRef, {
+                                    paid: true,
+                                    paymentId: entity.id,
+                                    orderId: entity.order_id || null,
+                                    method: entity.method || 'unknown',
+                                    paidAmount: (entity.amount || 0) / 100,
+                                    paidAt: admin.firestore.FieldValue.serverTimestamp()
+                                });
 
-                } catch (error) {
-                    console.error('❌ Firestore Update Error:', error);
+                                transaction.update(tournamentRef, {
+                                    totalCollections: admin.firestore.FieldValue.increment((entity.amount || 0) / 100),
+                                    paidPlayerCount: admin.firestore.FieldValue.increment(1)
+                                });
+
+                                // Calculate split amounts
+                                const totalAmount = (entity.amount || 0) / 100;
+                                const organizerShare = totalAmount * 0.95;
+                                const platformCommission = totalAmount * 0.05;
+
+                                const transactionIdFromNotes = entity.notes.transactionId;
+                                const tRef = db.collection('transactions').doc(transactionIdFromNotes || entity.id);
+                                transaction.set(tRef, {
+                                    id: transactionIdFromNotes || entity.id,
+                                    type: 'collection',
+                                    ownerId: 'force_owner',
+                                    tournamentId,
+                                    tournamentName: tournamentDoc.exists ? tournamentDoc.data().name : 'Tournament',
+                                    playerId,
+                                    playerName: playerDoc.data().playerName || 'Player',
+                                    amount: totalAmount,
+                                    organizerShare: parseFloat(organizerShare.toFixed(2)),
+                                    platformCommission: parseFloat(platformCommission.toFixed(2)),
+                                    status: 'SUCCESS',
+                                    method: entity.method || 'unknown',
+                                    razorpayPaymentId: entity.id,
+                                    razorpayOrderId: entity.order_id || null,
+                                    settlementHeld: true, // Will be set to false when owner releases
+                                    transferStatus: 'on_hold', // on_hold, processing, processed, failed
+                                    createdAt: new Date().toISOString(),
+                                    webhookReceivedAt: admin.firestore.FieldValue.serverTimestamp(),
+                                    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+                                }, { merge: true });
+                            }
+                        });
+                    } catch (e) { console.error("Payment Sync Err:", e); }
                 }
-            } else {
-                console.warn('⚠️ Missing tournamentId or playerId in payment notes');
+            } else if (event === 'payment.failed') {
+                const { transactionId } = entity.notes || {};
+                if (transactionId) {
+                    await db.collection('transactions').doc(transactionId).update({
+                        status: 'FAILED',
+                        failureReason: entity.error_description || 'Unknown',
+                        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+                    });
+                }
             }
         }
 
-        res.status(200).send({ status: 'ok' });
-    });
+        // Handle Transfer Events (Razorpay Route)
+        else if (event.startsWith('transfer.')) {
+            const transfer = payload.transfer.entity;
+            const { tournamentId, playerId } = transfer.notes || {};
 
-// Securely create an organizer account (Admin SDK)
-// Using Gen 2 onCall with Secrets
-exports.createOrganizer = onCall(async (request) => {
-    // 1. Verify Authentication & Role
-    if (!request.auth) {
-        throw new HttpsError('unauthenticated', 'User must be logged in.');
+            console.log(`🔄 Transfer Event: ${event} - ${transfer.id}`);
+
+            if (event === 'transfer.processed') {
+                // Transfer successfully settled to organizer
+                if (tournamentId) {
+                    // Find and update transaction
+                    const transactionsSnap = await db.collection('transactions')
+                        .where('transferId', '==', transfer.id)
+                        .limit(1)
+                        .get();
+
+                    if (!transactionsSnap.empty) {
+                        await transactionsSnap.docs[0].ref.update({
+                            transferStatus: 'processed',
+                            settlementCompletedAt: admin.firestore.FieldValue.serverTimestamp(),
+                            updatedAt: admin.firestore.FieldValue.serverTimestamp()
+                        });
+
+                        console.log(`✅ Transaction updated: ${transactionsSnap.docs[0].id}`);
+                    }
+
+                    // Check if all transfers for tournament are processed
+                    const allTransfersSnap = await db.collection('transactions')
+                        .where('tournamentId', '==', tournamentId)
+                        .where('type', '==', 'collection')
+                        .get();
+
+                    const allProcessed = allTransfersSnap.docs.every(doc =>
+                        doc.data().transferStatus === 'processed'
+                    );
+
+                    if (allProcessed) {
+                        await db.collection('tournaments').doc(tournamentId).update({
+                            settlementStatus: 'completed',
+                            settlementCompletedAt: admin.firestore.FieldValue.serverTimestamp()
+                        });
+                        console.log(`✅ Tournament settlement completed: ${tournamentId}`);
+                    }
+                }
+            } else if (event === 'transfer.failed') {
+                // Transfer failed
+                if (tournamentId) {
+                    const transactionsSnap = await db.collection('transactions')
+                        .where('transferId', '==', transfer.id)
+                        .limit(1)
+                        .get();
+
+                    if (!transactionsSnap.empty) {
+                        await transactionsSnap.docs[0].ref.update({
+                            transferStatus: 'failed',
+                            failureReason: transfer.failure_reason || 'Transfer failed',
+                            updatedAt: admin.firestore.FieldValue.serverTimestamp()
+                        });
+                    }
+
+                    await db.collection('tournaments').doc(tournamentId).update({
+                        settlementStatus: 'failed',
+                        lastTransferError: transfer.failure_reason || 'Transfer failed'
+                    });
+
+                    console.error(`❌ Transfer failed: ${transfer.id}`);
+                }
+            }
+        }
+
+        res.status(200).send('ok');
     }
+);
 
-    const callerUid = request.auth.uid;
+/**
+ * Cloud Function to create organizer with Razorpay Route Linked Account
+ */
+exports.createOrganizer = onCall(
+    {
+        secrets: ["RAZORPAY_KEY_ID", "RAZORPAY_KEY_SECRET"],
+        cors: ["http://localhost:8081", "https://force-player-register-ap-ade3a.web.app", "https://force-player-register-ap-ade3a.firebaseapp.com"]
+    },
+    async (request) => {
+        if (!request.auth || (request.auth.token.role !== 'owner' && !request.auth.token.admin)) {
+            throw new HttpsError('permission-denied', 'Unauthorized');
+        }
 
-    const callerDoc = await db.collection('users').doc(callerUid).get();
-    const isLocalOwner = callerDoc.exists && callerDoc.data().role === 'owner';
-    const hasOwnerClaim = request.auth.token.role === 'owner';
+        const { email, password, name, phone, bankDetails } = request.data;
 
-    if (!isLocalOwner && !hasOwnerClaim) {
-        throw new HttpsError('permission-denied', 'Only owners can create organizers.');
-    }
-
-    const { email, password, name, phone, address, aadharNumber, panNumber, profilePic, aadharPhoto, panPhoto, bankDetails, accessExpiryDate } = request.data;
-
-    console.log("Creating organizer with data:", { email, name, phone, address }); // Debug Log
-
-    // 2. Validate Data
-    const requiredFields = [
-        { key: 'email', val: email, label: 'Email' },
-        { key: 'password', val: password, label: 'Password' },
-        { key: 'name', val: name, label: 'Name' },
-        { key: 'phone', val: phone, label: 'Phone' },
-        { key: 'address', val: address, label: 'Address' },
-        { key: 'aadharNumber', val: aadharNumber, label: 'Aadhar Number' },
-        { key: 'panNumber', val: panNumber, label: 'PAN Number' },
-        { key: 'bankDetails', val: bankDetails, label: 'Bank Details' }
-    ];
-
-    const missing = requiredFields.filter(f => !f.val);
-    if (missing.length > 0) {
-        throw new HttpsError('invalid-argument', `Missing required fields: ${missing.map(m => m.label).join(', ')}`);
-    }
-
-    if (!bankDetails.accountNumber || !bankDetails.ifsc || !bankDetails.bankName) {
-        throw new HttpsError('invalid-argument', 'Incomplete bank details.');
-    }
-
-    try {
-        // 3. Create User in Authentication
-        let userRecord;
         try {
-            userRecord = await admin.auth().createUser({
+            // Create Firebase Auth User
+            const userRecord = await admin.auth().createUser({
                 email,
                 password,
                 displayName: name,
-                disabled: false,
+                phoneNumber: phone
             });
-        } catch (authError) {
-            if (authError.code === 'auth/email-already-exists') {
-                throw new HttpsError('already-exists', 'This email is already registered as an organizer or player.');
-            }
-            throw authError;
+
+            // Set Custom Claims
+            await admin.auth().setCustomUserClaims(userRecord.uid, { role: 'organizer' });
+
+            // Create Razorpay Linked Account (Route)
+            const linkedAccount = await createLinkedAccount({
+                uid: userRecord.uid,
+                email,
+                name,
+                phone,
+                bankDetails
+            }, {
+                RAZORPAY_KEY_ID: process.env.RAZORPAY_KEY_ID,
+                RAZORPAY_KEY_SECRET: process.env.RAZORPAY_KEY_SECRET
+            });
+
+            // Store in Firestore
+            await db.collection('users').doc(userRecord.uid).set({
+                uid: userRecord.uid,
+                email,
+                name,
+                phone,
+                role: 'organizer',
+                bankDetails,
+                linkedAccountId: linkedAccount.id,
+                linkedAccountStatus: linkedAccount.status || 'created', // active, pending, suspended, created
+                createdAt: admin.firestore.FieldValue.serverTimestamp()
+            });
+
+            return {
+                success: true,
+                uid: userRecord.uid,
+                linkedAccountId: linkedAccount.id,
+                kycRequired: linkedAccount.status !== 'active',
+                message: 'Organizer created. KYC verification required via email.'
+            };
+        } catch (error) {
+            console.error('❌ Create organizer error:', error);
+            throw new HttpsError('internal', error.message);
+        }
+    }
+);
+
+/**
+ * Create Razorpay Order with Route Transfers
+ * Called before opening Razorpay checkout
+ */
+exports.createPaymentWithRoute = onCall(
+    {
+        secrets: ["RAZORPAY_KEY_ID", "RAZORPAY_KEY_SECRET"],
+        cors: ["http://localhost:8081", "https://force-player-register-ap-ade3a.web.app", "https://force-player-register-ap-ade3a.firebaseapp.com"]
+    },
+    async (request) => {
+        const { tournamentId, playerId, amount, playerName, transactionId } = request.data;
+        console.log(`📦 createPaymentWithRoute: playerId=${playerId} (Type=${typeof playerId}), tourneyId=${tournamentId}, amt=${amount}`);
+
+        if (!playerId || playerId === 'null' || playerId === 'undefined' || playerId === 'null' || playerId === 'undefined' || (typeof playerId === 'object' && !playerId)) {
+            console.error("❌ CRITICAL: playerId is missing or invalid on server:", {
+                value: playerId,
+                type: typeof playerId,
+                raw: request.data
+            });
+            throw new HttpsError('invalid-argument', 'Missing playerId');
         }
 
-        // 4. Create User Document in Firestore
-        await db.collection('users').doc(userRecord.uid).set({
-            name,
-            email,
-            phone: phone || null,  // Prevent undefined
-            role: 'organizer',
-            address: address || null, // Prevent undefined
-            aadharNumber,
-            panNumber: panNumber || null,
-            profilePic: profilePic || null,
-            aadharPhoto: aadharPhoto || null,
-            panPhoto: panPhoto || null,
-            bankDetails: bankDetails || {},
-            accessExpiryDate: accessExpiryDate,
-            createdBy: callerUid,
-            createdAt: new Date().toISOString(),
-            isVerified: true
-        });
+        if (!tournamentId || tournamentId === 'null' || tournamentId === 'undefined') {
+            console.error("❌ Missing tournamentId:", tournamentId);
+            throw new HttpsError('invalid-argument', 'Missing tournamentId');
+        }
+        if (!amount || isNaN(parseFloat(amount))) {
+            console.error("❌ Missing or invalid amount:", amount);
+            throw new HttpsError('invalid-argument', 'Missing or invalid amount');
+        }
 
-        // 5. Set Custom Claims (Optional but recommended for faster rule checks)
-        await admin.auth().setCustomUserClaims(userRecord.uid, { role: 'organizer' });
+        try {
+            // Get tournament details
+            const tournamentDoc = await db.collection('tournaments').doc(tournamentId).get();
+            if (!tournamentDoc.exists) {
+                throw new HttpsError('not-found', 'Tournament not found');
+            }
 
-        // 6. Send Email Notification via Extension
-        await db.collection('mail').add({
-            to: email,
-            message: {
-                subject: 'Welcome to Force Player Register Family',
-            },
-            template: {
-                name: 'organizer-welcome',
-                data: {
-                    ORGANIZER_NAME: name,
-                    ORGANIZER_EMAIL: email,
-                    ORGANIZER_PHONE: phone || null,
-                    ORGANIZER_ADDRESS: address || null,
-                    ORGANIZER_PASSWORD: password,
-                    APP_NAME: 'Force Player Register',
-                    LINK: 'https://force-player-register-ap-ade3a.web.app/login'
+            const tournament = tournamentDoc.data();
+
+            // Get organizer's linked account
+            const organizerDoc = await db.collection('users').doc(tournament.organizerId).get();
+            if (!organizerDoc.exists) {
+                throw new HttpsError('not-found', 'Organizer not found');
+            }
+
+            const organizer = organizerDoc.data();
+            const linkedAccountId = organizer.linkedAccountId || null;
+
+            if (!linkedAccountId) {
+                console.error(`❌ Payment Blocked: Organizer ${tournament.organizerId} has no linked account.`);
+                throw new HttpsError('failed-precondition',
+                    `This tournament is not ready to accept payments. The organizer must link their Razorpay Route account (acc_...) in the settlement configuration to enable automated 95/5 splitting. Please contact support or the tournament owner.`);
+            }
+
+            // Calculate split amounts (in paise)
+            const totalAmount = Math.round(amount * 100);
+            const organizerShare = Math.round(totalAmount * 0.95);
+            const platformCommission = totalAmount - organizerShare;
+
+            console.log(`💰 Creating order: ₹${totalAmount / 100} (Org: ₹${organizerShare / 100}, Platform: ₹${platformCommission / 100})`);
+
+            // Create Razorpay instance
+            const rzp = getRazorpayInstance({
+                RAZORPAY_KEY_ID: process.env.RAZORPAY_KEY_ID,
+                RAZORPAY_KEY_SECRET: process.env.RAZORPAY_KEY_SECRET
+            });
+
+            // Prepare order options
+            const orderOptions = {
+                amount: totalAmount,
+                currency: 'INR',
+                receipt: `rcpt_${Date.now()}`,
+                notes: {
+                    tournamentId,
+                    playerId,
+                    playerName: playerName || 'Player',
+                    tournamentName: tournament.name,
+                    transactionId: transactionId || null
+                }
+            };
+
+            // Add Route transfers ONLY if linked account exists
+            if (linkedAccountId) {
+                orderOptions.transfers = [
+                    {
+                        account: linkedAccountId,
+                        amount: organizerShare,
+                        currency: 'INR',
+                        notes: {
+                            type: 'organizer_share',
+                            tournamentId,
+                            playerId,
+                            playerName: playerName || 'Player',
+                            tournamentName: tournament.name
+                        },
+                        linked_account_notes: [
+                            'tournamentName',
+                            'playerName'
+                        ],
+                        on_hold: true, // Hold settlement until owner releases
+                        on_hold_until: Math.floor(Date.now() / 1000) + (30 * 24 * 60 * 60)
+                    }
+                ];
+                console.log(`🔗 Route transfers added for account: ${linkedAccountId}`);
+            } else {
+                console.log(`ℹ️ Standard payment - No transfers added.`);
+            }
+
+            const order = await rzp.orders.create(orderOptions);
+
+            console.log(`✅ Order created: ${order.id}${linkedAccountId ? ' (Route)' : ' (Standard)'}`);
+            if (linkedAccountId) {
+                console.log(`💰 Route Split: ₹${organizerShare / 100} (held) + ₹${platformCommission / 100} (instant)`);
+            }
+
+            // Store transfer ID in transaction (will be updated by webhook)
+            // We'll get the transfer ID from the order
+            if (order.transfers && order.transfers.length > 0) {
+                const transferId = order.transfers[0].id;
+                console.log(`🔗 Transfer ID: ${transferId}`);
+            }
+
+            return {
+                success: true,
+                orderId: order.id,
+                amount: totalAmount,
+                organizerShare: organizerShare / 100,
+                platformCommission: platformCommission / 100,
+                kycWarning: organizer.linkedAccountStatus !== 'active' ?
+                    'Organizer KYC pending. Transfer will be processed after KYC completion.' : null
+            };
+
+        } catch (error) {
+            console.error('❌ Order creation error details:', error);
+            // Razorpay errors often contain a 'description' or 'error' object
+            const errorMsg = error.description || (error.error && error.error.description) || error.message || 'Unknown error';
+            throw new HttpsError('internal', `Razorpay Error: ${errorMsg}`);
+        }
+    }
+);
+
+/**
+ * Release Settlement to Organizer
+ * Called by owner when marking tournament complete
+ */
+exports.releaseSettlement = onCall(
+    {
+        secrets: ["RAZORPAY_KEY_ID", "RAZORPAY_KEY_SECRET"],
+        cors: ["http://localhost:8081", "https://force-player-register-ap-ade3a.web.app", "https://force-player-register-ap-ade3a.firebaseapp.com"]
+    },
+    async (request) => {
+        if (!request.auth || (request.auth.token.role !== 'owner' && !request.auth.token.admin)) {
+            throw new HttpsError('permission-denied', 'Unauthorized');
+        }
+
+        const { tournamentId } = request.data;
+
+        if (!tournamentId) {
+            throw new HttpsError('invalid-argument', 'Tournament ID required');
+        }
+
+        try {
+            const tournamentRef = db.collection('tournaments').doc(tournamentId);
+            const tournamentDoc = await tournamentRef.get();
+
+            if (!tournamentDoc.exists) {
+                throw new HttpsError('not-found', 'Tournament not found');
+            }
+
+            const tournament = tournamentDoc.data();
+
+            if (tournament.settlementStatus === 'released' || tournament.settlementStatus === 'completed') {
+                throw new HttpsError('already-exists', 'Settlement already released');
+            }
+
+            // Get all transactions with held transfers
+            const transactionsSnap = await db.collection('transactions')
+                .where('tournamentId', '==', tournamentId)
+                .where('type', '==', 'collection')
+                .where('settlementHeld', '==', true)
+                .get();
+
+            if (transactionsSnap.empty) {
+                throw new HttpsError('not-found', 'No held settlements found');
+            }
+
+            const cleanId = process.env.RAZORPAY_KEY_ID?.trim();
+            const cleanSecret = process.env.RAZORPAY_KEY_SECRET?.trim();
+            const auth = Buffer.from(`${cleanId}:${cleanSecret}`).toString('base64');
+            const releasedTransfers = [];
+            const failedTransfers = [];
+
+            // Get transfer IDs from Razorpay orders
+            const rzp = getRazorpayInstance({
+                RAZORPAY_KEY_ID: process.env.RAZORPAY_KEY_ID,
+                RAZORPAY_KEY_SECRET: process.env.RAZORPAY_KEY_SECRET
+            });
+
+            // Release each transfer
+            for (const txnDoc of transactionsSnap.docs) {
+                const txn = txnDoc.data();
+
+                try {
+                    // Get order details to find transfer ID
+                    if (txn.razorpayOrderId) {
+                        const order = await rzp.orders.fetch(txn.razorpayOrderId);
+
+                        if (order.transfers && order.transfers.length > 0) {
+                            const transferId = order.transfers[0].id;
+
+                            // Release the transfer
+                            const response = await fetch(`https://api.razorpay.com/v1/transfers/${transferId}`, {
+                                method: 'PATCH',
+                                headers: {
+                                    'Content-Type': 'application/json',
+                                    'Authorization': `Basic ${auth}`
+                                },
+                                body: JSON.stringify({
+                                    on_hold: false
+                                })
+                            });
+
+                            if (response.ok) {
+                                const transfer = await response.json();
+                                releasedTransfers.push(transfer.id);
+
+                                // Update transaction
+                                await txnDoc.ref.update({
+                                    transferId: transfer.id,
+                                    settlementHeld: false,
+                                    transferStatus: 'processing',
+                                    releasedAt: admin.firestore.FieldValue.serverTimestamp(),
+                                    releasedBy: request.auth.uid,
+                                    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+                                });
+
+                                console.log(`✅ Released transfer: ${transfer.id}`);
+                            } else {
+                                const error = await response.json().catch(() => ({}));
+                                console.error(`❌ Failed to release transfer ${transferId}:`, error);
+                                failedTransfers.push({ transferId, error: error.error?.description || 'Unknown error' });
+                            }
+                        }
+                    }
+                } catch (err) {
+                    console.error(`❌ Error processing transaction ${txnDoc.id}:`, err.message);
+                    failedTransfers.push({ transactionId: txnDoc.id, error: err.message });
                 }
             }
-        });
 
-        return { success: true, uid: userRecord.uid };
+            // Update tournament
+            await tournamentRef.update({
+                settlementStatus: releasedTransfers.length > 0 ? 'released' : 'failed',
+                settlementReleasedAt: admin.firestore.FieldValue.serverTimestamp(),
+                settlementReleasedBy: request.auth.uid,
+                totalHeldAmount: 0,
+                updatedAt: admin.firestore.FieldValue.serverTimestamp()
+            });
 
-    } catch (error) {
-        console.error("Error creating organizer:", error);
-        throw new HttpsError('internal', error.message);
-    }
-});
-
-// Temporary function to upload templates
-exports.setupTemplates = functions.https.onRequest(async (req, res) => {
-    try {
-        const templatesDir = path.join(__dirname, 'email-templates');
-        if (!fs.existsSync(templatesDir)) {
-            return res.status(404).send('Templates dir not found in ' + templatesDir);
-        }
-
-        const files = fs.readdirSync(templatesDir);
-        const batch = db.batch();
-        let count = 0;
-
-        for (const file of files) {
-            if (path.extname(file) === '.html') {
-                const name = path.basename(file, '.html');
-                const content = fs.readFileSync(path.join(templatesDir, file), 'utf8');
-                // Extension expects template to be a document with fields
-                // We put the CONTENT in 'html' field (or 'subject' etc)
-                const ref = db.collection('email_templates').doc(name);
-                batch.set(ref, {
-                    html: content, // The actual HTML content
-                    updatedAt: admin.firestore.FieldValue.serverTimestamp()
-                }, { merge: true });
-                count++;
+            console.log(`✅ Released ${releasedTransfers.length} settlements for tournament ${tournamentId}`);
+            if (failedTransfers.length > 0) {
+                console.error(`❌ Failed to release ${failedTransfers.length} transfers`);
             }
-        }
-        await batch.commit();
-        res.send(`Successfully uploaded ${count} templates to Firestore 'email_templates' collection.`);
-    } catch (error) {
-        console.error("Template Upload Error:", error);
-        res.status(500).send(error.message);
-    }
-});
 
-// Temporary function to check mail status
-exports.checkMailStatus = functions.https.onRequest(async (req, res) => {
-    try {
-        const snapshot = await db.collection('mail')
-            .orderBy('delivery.startTime', 'desc')
-            .limit(5)
+            return {
+                success: true,
+                releasedCount: releasedTransfers.length,
+                failedCount: failedTransfers.length,
+                transferIds: releasedTransfers,
+                errors: failedTransfers.length > 0 ? failedTransfers : undefined,
+                message: `Released ${releasedTransfers.length} settlements. ${failedTransfers.length > 0 ? `${failedTransfers.length} failed.` : ''}`
+            };
+
+        } catch (error) {
+            console.error('❌ Settlement release error:', error);
+            throw new HttpsError('internal', error.message);
+        }
+    }
+);
+
+/**
+ * Cloud Function to create Player Payment Transaction (STARTED)
+ */
+exports.createPlayerPaymentTransaction = onCall(
+    {
+        cors: ["http://localhost:8081", "https://force-player-register-ap-ade3a.web.app", "https://force-player-register-ap-ade3a.firebaseapp.com"]
+    },
+    async (request) => {
+        const { tournamentId, amount, playerId, playerName } = request.data;
+
+        console.log(`📝 createPlayerPaymentTransaction: playerId=${playerId}, tourney=${tournamentId}`);
+
+        if (!playerId || playerId === 'null' || playerId === 'undefined') {
+            console.error("❌ Missing playerId in createPlayerPaymentTransaction");
+            throw new HttpsError('invalid-argument', 'Missing playerId');
+        }
+
+        if (!tournamentId || tournamentId === 'null' || tournamentId === 'undefined') {
+            console.error("❌ Missing tournamentId in createPlayerPaymentTransaction");
+            throw new HttpsError('invalid-argument', 'Missing tournamentId');
+        }
+
+        const transactionRef = db.collection('transactions').doc();
+        await transactionRef.set({
+            id: transactionRef.id,
+            tournamentId,
+            playerId,
+            playerName,
+            amount: parseFloat(amount),
+            status: 'STARTED',
+            createdAt: admin.firestore.FieldValue.serverTimestamp()
+        });
+        return { success: true, transactionId: transactionRef.id };
+    }
+);
+
+/**
+ * Start a Payout Transaction record (Legacy/Manual)
+ */
+exports.createPayoutTransaction = onCall(
+    {
+        secrets: ["RAZORPAY_KEY_ID", "RAZORPAY_KEY_SECRET"],
+        cors: ["http://localhost:8081", "https://force-player-register-ap-ade3a.web.app", "https://force-player-register-ap-ade3a.firebaseapp.com"]
+    },
+    async (request) => {
+        if (!request.auth || (request.auth.token.role !== 'owner' && !request.auth.token.admin)) {
+            throw new HttpsError('permission-denied', 'Unauthorized');
+        }
+
+        const { tournamentId, organizerId, amount } = request.data;
+
+        try {
+            const tournamentRef = db.collection('tournaments').doc(tournamentId);
+            const tournamentDoc = await tournamentRef.get();
+            if (!tournamentDoc.exists) throw new HttpsError('not-found', 'Tournament not found');
+
+            const tournamentData = tournamentDoc.data();
+            const transactionRef = db.collection('transactions').doc();
+
+            await transactionRef.set({
+                id: transactionRef.id,
+                type: 'payout',
+                ownerId: 'force_owner',
+                tournamentId,
+                tournamentName: tournamentData.name || 'Tournament',
+                receiver: { id: organizerId || tournamentData.organizerId, name: 'Organizer' },
+                amount: parseFloat(amount),
+                status: 'STARTED',
+                createdAt: new Date().toISOString(),
+                updatedAt: admin.firestore.FieldValue.serverTimestamp()
+            });
+
+            return { success: true, transactionId: transactionRef.id, amount };
+        } catch (error) {
+            console.error('❌ Error creating payout transaction:', error);
+            throw new HttpsError('internal', error.message);
+        }
+    }
+);
+
+/**
+ * Handle Manual Payout (Simplified - No RazorpayX)
+ */
+exports.processPayout = onCall(
+    {
+        cors: ["http://localhost:8081", "https://force-player-register-ap-ade3a.web.app", "https://force-player-register-ap-ade3a.firebaseapp.com"]
+    },
+    async (request) => {
+        if (!request.auth || (request.auth.token.role !== 'owner' && !request.auth.token.admin)) {
+            throw new HttpsError('permission-denied', 'Unauthorized');
+        }
+
+        const { transactionId } = request.data;
+        const transactionRef = db.collection('transactions').doc(transactionId);
+        const tDoc = await transactionRef.get();
+
+        if (!tDoc.exists) throw new HttpsError('not-found', 'Transaction not found');
+
+        try {
+            // For Manual Mode: We just mark it as success immediately 
+            // as the owner is confirming they did the transfer manually.
+            const tData = tDoc.data();
+
+            await transactionRef.update({
+                status: 'SUCCESS',
+                processedAt: admin.firestore.FieldValue.serverTimestamp(),
+                updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+                method: 'manual_transfer'
+            });
+
+            if (tData.tournamentId) {
+                await db.collection('tournaments').doc(tData.tournamentId).update({
+                    settlementStatus: 'completed',
+                    settlementAmount: tData.amount,
+                    settlementDate: new Date().toISOString(),
+                    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+                });
+            }
+
+            return { success: true, message: 'Manual settlement recorded' };
+        } catch (error) {
+            console.error('❌ Payout process error:', error);
+            throw new HttpsError('internal', error.message);
+        }
+    }
+);
+
+/**
+ * Sync status for manual payouts
+ */
+exports.syncPayoutStatus = onCall(
+    {
+        cors: ["http://localhost:8081", "https://force-player-register-ap-ade3a.web.app", "https://force-player-register-ap-ade3a.firebaseapp.com"]
+    },
+    async (request) => {
+        const { transactionId } = request.data;
+        const transactionRef = db.collection('transactions').doc(transactionId);
+        const tDoc = await transactionRef.get();
+        if (!tDoc.exists) throw new HttpsError('not-found', 'Transaction not found');
+
+        return { success: true, status: tDoc.data().status };
+    }
+);
+
+/**
+ * Manually Link Razorpay Route Account to Organizer
+ */
+exports.linkRouteAccount = onCall(
+    {
+        cors: ["http://localhost:8081", "https://force-player-register-ap-ade3a.web.app", "https://force-player-register-ap-ade3a.firebaseapp.com"]
+    },
+    async (request) => {
+        console.log('🔗 Link Account Request:', request.data);
+        console.log('👤 User Auth:', { uid: request.auth?.uid, token: request.auth?.token });
+
+        if (!request.auth || (request.auth.token.role !== 'owner' && !request.auth.token.admin)) {
+            console.error('❌ Permission Denied: User is not owner/admin');
+            throw new HttpsError('permission-denied', 'Unauthorized');
+        }
+
+        const { organizerId, linkedAccountId } = request.data;
+        if (!organizerId || !linkedAccountId) {
+            throw new HttpsError('invalid-argument', 'Missing organizerId or linkedAccountId');
+        }
+
+        if (!linkedAccountId.startsWith('acc_')) {
+            throw new HttpsError('invalid-argument', 'Invalid Account ID format. Must start with acc_');
+        }
+
+        try {
+            const userRef = db.collection('users').doc(organizerId);
+            const userDoc = await userRef.get();
+
+            if (!userDoc.exists) {
+                console.error(`❌ User ${organizerId} not found`);
+                throw new HttpsError('not-found', 'Organizer user document not found');
+            }
+
+            await userRef.update({
+                linkedAccountId: linkedAccountId.trim(),
+                linkedAccountStatus: 'active',
+                updatedAt: admin.firestore.FieldValue.serverTimestamp()
+            });
+
+            console.log(`✅ Linked account ${linkedAccountId} to organizer ${organizerId}`);
+            return {
+                success: true,
+                message: 'Account linked successfully',
+                linkedAccountId: linkedAccountId.trim()
+            };
+        } catch (error) {
+            console.error('❌ Link account internal error:', error);
+            // Don't re-throw HttpsError, but wrap others
+            if (error instanceof HttpsError) throw error;
+            throw new HttpsError('internal', error.message || 'Database update failed');
+        }
+    }
+);
+
+/**
+ * Verify Payment - Server-side signature verification for every payment
+ * Called by the client after Razorpay checkout completes
+ */
+exports.verifyPayment = onCall(
+    {
+        secrets: ["RAZORPAY_KEY_ID", "RAZORPAY_KEY_SECRET"],
+        cors: ["http://localhost:8081", "https://force-player-register-ap-ade3a.web.app", "https://force-player-register-ap-ade3a.firebaseapp.com"]
+    },
+    async (request) => {
+        const {
+            razorpay_payment_id,
+            razorpay_order_id,
+            razorpay_signature,
+            tournamentId,
+            playerId,
+            transactionId
+        } = request.data;
+
+        // SECURITY: Comprehensive Input Validation
+        if (!razorpay_payment_id || typeof razorpay_payment_id !== 'string') {
+            throw new HttpsError('invalid-argument', 'Invalid payment ID format');
+        }
+
+        if (razorpay_payment_id.length > 50 || !/^pay_[a-zA-Z0-9]+$/.test(razorpay_payment_id)) {
+            throw new HttpsError('invalid-argument', 'Invalid payment ID pattern');
+        }
+
+        // SECURITY: Check for duplicate verification (prevent replay attacks)
+        const existingVerification = await db.collection('payment_verification_logs')
+            .where('razorpay_payment_id', '==', razorpay_payment_id)
+            .where('status', '==', 'VERIFIED')
+            .limit(1)
             .get();
 
-        if (snapshot.empty) {
-            // Fallback: Just get last 5 added
-            const fallback = await db.collection('mail').limit(5).get();
-            if (fallback.empty) return res.send("No documents found in 'mail' collection.");
-
-            const results = fallback.docs.map(doc => ({
-                id: doc.id,
-                data: doc.data()
-            }));
-            return res.json(results);
+        if (!existingVerification.empty) {
+            console.warn(`⚠️ Duplicate verification attempt for ${razorpay_payment_id}`);
+            throw new HttpsError('already-exists', 'Payment already verified');
         }
 
-        const results = snapshot.docs.map(doc => ({
-            id: doc.id,
-            delivery: doc.data().delivery,
-            to: doc.data().to,
-            error: doc.data().delivery?.error || null,
-            state: doc.data().delivery?.state || 'UNKNOWN'
-        }));
+        const rzpKeySecret = process.env.RAZORPAY_KEY_SECRET?.trim();
+        if (!rzpKeySecret) {
+            console.error('❌ RAZORPAY_KEY_SECRET not configured');
+            throw new HttpsError('internal', 'Payment verification not configured');
+        }
 
-        res.json(results);
-    } catch (error) {
-        res.status(500).send(error.message);
+        console.log(`🔐 Verifying payment: ${razorpay_payment_id}`);
+
+        try {
+            let isSignatureValid = false;
+
+            // Step 1: Verify Signature (if order_id and signature are provided)
+            if (razorpay_order_id && razorpay_signature) {
+                const payload = razorpay_order_id + "|" + razorpay_payment_id;
+                const expectedSignature = crypto
+                    .createHmac('sha256', rzpKeySecret)
+                    .update(payload)
+                    .digest('hex');
+
+                isSignatureValid = expectedSignature === razorpay_signature;
+                console.log(`📝 Signature verification: ${isSignatureValid ? '✅ VALID' : '❌ INVALID'}`);
+
+                if (!isSignatureValid) {
+                    // Log the failed verification attempt
+                    await db.collection('payment_verification_logs').add({
+                        razorpay_payment_id,
+                        razorpay_order_id,
+                        tournamentId,
+                        playerId,
+                        status: 'SIGNATURE_MISMATCH',
+                        timestamp: admin.firestore.FieldValue.serverTimestamp(),
+                        ip: request.rawRequest?.ip || 'unknown',
+                        userId: request.auth?.uid || 'anonymous'
+                    });
+                    throw new HttpsError('permission-denied', 'Payment signature verification failed');
+                }
+            }
+
+            // Step 2: Fetch payment details from Razorpay API to double-verify
+            const rzp = getRazorpayInstance({
+                RAZORPAY_KEY_ID: process.env.RAZORPAY_KEY_ID,
+                RAZORPAY_KEY_SECRET: process.env.RAZORPAY_KEY_SECRET
+            });
+
+            const payment = await rzp.payments.fetch(razorpay_payment_id);
+            console.log(`💳 Payment Status from Razorpay: ${payment.status}`);
+
+            // Verify payment status is captured
+            if (payment.status !== 'captured' && payment.status !== 'authorized') {
+                throw new HttpsError('failed-precondition', `Payment not captured. Status: ${payment.status}`);
+            }
+
+            // SECURITY: Verify payment amount matches tournament fee
+            const finalTournamentId = tournamentId || payment.notes?.tournamentId;
+            if (finalTournamentId) {
+                const tournamentDoc = await db.collection('tournaments').doc(finalTournamentId).get();
+                if (tournamentDoc.exists) {
+                    const expectedAmount = tournamentDoc.data()?.entryFee || 0;
+                    const paidAmount = payment.amount / 100;
+
+                    if (Math.abs(paidAmount - expectedAmount) > 0.01) {
+                        console.error(`❌ Amount mismatch: expected ₹${expectedAmount}, got ₹${paidAmount}`);
+                        await db.collection('payment_verification_logs').add({
+                            razorpay_payment_id,
+                            status: 'AMOUNT_MISMATCH',
+                            expectedAmount,
+                            paidAmount,
+                            timestamp: admin.firestore.FieldValue.serverTimestamp()
+                        });
+                        throw new HttpsError('invalid-argument',
+                            `Amount mismatch: expected ₹${expectedAmount}, received ₹${paidAmount}`);
+                    }
+                }
+            }
+
+            // Step 3: Auto-capture if only authorized
+            if (payment.status === 'authorized') {
+                console.log(`🎯 Auto-capturing authorized payment: ${razorpay_payment_id}`);
+                try {
+                    await rzp.payments.capture(razorpay_payment_id, payment.amount, payment.currency);
+                    console.log(`✅ Payment captured successfully`);
+                } catch (captureErr) {
+                    if (!captureErr.message?.includes('already been captured')) {
+                        console.error(`❌ Capture failed:`, captureErr.message);
+                        throw new HttpsError('internal', 'Failed to capture payment');
+                    }
+                }
+            }
+
+            // Step 4: Extract tournament and player info from payment notes or parameters
+            const finalPlayerId = playerId || payment.notes?.playerId;
+
+            if (!finalTournamentId || !finalPlayerId) {
+                console.warn('⚠️ Missing tournament/player ID in verification');
+            }
+
+            // Step 5: Get transfer ID from order
+            let transferId = null;
+            if (razorpay_order_id) {
+                try {
+                    const order = await rzp.orders.fetch(razorpay_order_id);
+                    if (order.transfers && order.transfers.length > 0) {
+                        transferId = order.transfers[0].id;
+                        console.log(`🔗 Transfer ID found: ${transferId}`);
+                    }
+                } catch (err) {
+                    console.warn('⚠️ Could not fetch order transfers:', err.message);
+                }
+            }
+
+            // Step 6: Update Firestore records
+            const batch = db.batch();
+
+            // Update player document
+            if (finalTournamentId && finalPlayerId) {
+                const playerRef = db.collection('tournaments').doc(finalTournamentId)
+                    .collection('players').doc(finalPlayerId);
+                const playerDoc = await playerRef.get();
+
+                if (playerDoc.exists && !playerDoc.data().paid) {
+                    batch.update(playerRef, {
+                        paid: true,
+                        paymentId: razorpay_payment_id,
+                        orderId: razorpay_order_id || null,
+                        method: payment.method || 'unknown',
+                        paidAmount: payment.amount / 100,
+                        paidAt: admin.firestore.FieldValue.serverTimestamp(),
+                        verifiedAt: admin.firestore.FieldValue.serverTimestamp(),
+                        verificationMethod: 'client_callback'
+                    });
+
+                    // Update tournament totals
+                    const tournamentRef = db.collection('tournaments').doc(finalTournamentId);
+                    const totalAmount = payment.amount / 100;
+                    const heldAmount = totalAmount * 0.95;
+
+                    // IF Duo and paidForPartner, increment count by 2
+                    const playerData = playerDoc.data();
+                    const incrementVal = (playerData.registrationMode === 'Duo' && playerData.paidForPartner) ? 2 : 1;
+
+                    batch.update(tournamentRef, {
+                        totalCollections: admin.firestore.FieldValue.increment(totalAmount),
+                        paidPlayerCount: admin.firestore.FieldValue.increment(incrementVal),
+                        totalHeldAmount: admin.firestore.FieldValue.increment(heldAmount),
+                        settlementStatus: 'held'
+                    });
+                }
+            }
+
+            // Update/Create transaction record
+            const totalAmount = payment.amount / 100;
+            const organizerShare = totalAmount * 0.95;
+            const platformCommission = totalAmount * 0.05;
+
+            const txnId = transactionId || payment.notes?.transactionId || razorpay_payment_id;
+            const txnRef = db.collection('transactions').doc(txnId);
+            batch.set(txnRef, {
+                id: txnId,
+                type: 'collection',
+                ownerId: 'force_owner',
+                tournamentId: finalTournamentId,
+                playerId: finalPlayerId,
+                amount: totalAmount,
+                organizerShare: parseFloat(organizerShare.toFixed(2)),
+                platformCommission: parseFloat(platformCommission.toFixed(2)),
+                status: 'SUCCESS',
+                method: payment.method || 'unknown',
+                razorpayPaymentId: razorpay_payment_id,
+                razorpayOrderId: razorpay_order_id || null,
+                transferId: transferId,
+                settlementHeld: true,
+                transferStatus: 'on_hold',
+                verified: true,
+                verificationMethod: 'client_callback',
+                verifiedAt: admin.firestore.FieldValue.serverTimestamp(),
+                createdAt: new Date().toISOString(),
+                updatedAt: admin.firestore.FieldValue.serverTimestamp()
+            }, { merge: true });
+
+            await batch.commit();
+
+            // Log successful verification
+            await db.collection('payment_verification_logs').add({
+                razorpay_payment_id,
+                razorpay_order_id,
+                tournamentId: finalTournamentId,
+                playerId: finalPlayerId,
+                transactionId: txnId,
+                transferId: transferId,
+                amount: totalAmount,
+                status: 'VERIFIED',
+                method: payment.method,
+                timestamp: admin.firestore.FieldValue.serverTimestamp()
+            });
+
+            console.log(`✅ Payment verified and recorded: ${razorpay_payment_id}`);
+
+            return {
+                success: true,
+                verified: true,
+                paymentId: razorpay_payment_id,
+                amount: totalAmount,
+                status: payment.status,
+                method: payment.method,
+                transferId: transferId
+            };
+
+        } catch (error) {
+            console.error('❌ Payment verification error:', error);
+
+            // Don't expose internal errors
+            if (error instanceof HttpsError) {
+                throw error;
+            }
+            throw new HttpsError('internal', 'Payment verification failed. Contact support.');
+        }
     }
-});
+);
+
+/**
+ * Process Player Refund
+ * Refunds 95% of the payment to the player (5% processing fee retained)
+ * Can only be initiated by tournament organizers or owners
+ */
+exports.processPlayerRefund = onCall(
+    {
+        secrets: ["RAZORPAY_KEY_ID", "RAZORPAY_KEY_SECRET"],
+        cors: ["http://localhost:8081", "https://force-player-register-ap-ade3a.web.app", "https://force-player-register-ap-ade3a.firebaseapp.com"]
+    },
+    async (request) => {
+        const {
+            tournamentId,
+            playerId,
+            reason,
+            refundPercentage = 95 // Default 95% refund
+        } = request.data;
+
+        // Validate inputs
+        if (!tournamentId || !playerId) {
+            throw new HttpsError('invalid-argument', 'Tournament ID and Player ID are required');
+        }
+
+        if (!request.auth) {
+            throw new HttpsError('unauthenticated', 'User must be authenticated');
+        }
+
+        try {
+            // Get tournament details
+            const tournamentRef = db.collection('tournaments').doc(tournamentId);
+            const tournamentDoc = await tournamentRef.get();
+
+            if (!tournamentDoc.exists) {
+                throw new HttpsError('not-found', 'Tournament not found');
+            }
+
+            const tournament = tournamentDoc.data();
+
+            // Check if user is owner or organizer of this tournament
+            const userDoc = await db.collection('users').doc(request.auth.uid).get();
+            const userRole = userDoc.data()?.role;
+            const isOwner = userRole === 'owner' || userRole === 'admin';
+            const isOrganizer = userRole === 'organizer' && tournament.organizerId === request.auth.uid;
+
+            if (!isOwner && !isOrganizer) {
+                throw new HttpsError('permission-denied', 'Only tournament organizers or owners can process refunds');
+            }
+
+            // Get player registration details
+            const playerRef = tournamentRef.collection('players').doc(playerId);
+            const playerDoc = await playerRef.get();
+
+            if (!playerDoc.exists) {
+                throw new HttpsError('not-found', 'Player registration not found');
+            }
+
+            const player = playerDoc.data();
+
+            // Check if player has paid
+            if (!player.paid) {
+                throw new HttpsError('failed-precondition', 'Player has not made any payment');
+            }
+
+            // Check if already refunded
+            if (player.refunded) {
+                throw new HttpsError('already-exists', 'Refund has already been processed for this player');
+            }
+
+            const paidAmount = player.paidAmount || player.amount || 0;
+            const razorpayPaymentId = player.paymentId;
+
+            if (!razorpayPaymentId) {
+                throw new HttpsError('failed-precondition', 'Payment ID not found. Cannot process refund.');
+            }
+
+            // Calculate refund amount (95% of paid amount)
+            const refundAmount = Math.floor(paidAmount * (refundPercentage / 100) * 100); // Convert to paise
+            const processingFee = Math.floor(paidAmount * ((100 - refundPercentage) / 100) * 100);
+
+            console.log(`💰 Processing refund: ₹${paidAmount} → ₹${refundAmount / 100} (${refundPercentage}%)`);
+
+            // Initialize Razorpay
+            const rzp = getRazorpayInstance({
+                RAZORPAY_KEY_ID: process.env.RAZORPAY_KEY_ID,
+                RAZORPAY_KEY_SECRET: process.env.RAZORPAY_KEY_SECRET
+            });
+
+            // Process refund via Razorpay API
+            const refund = await rzp.payments.refund(razorpayPaymentId, {
+                amount: refundAmount,
+                speed: 'normal', // or 'optimum'
+                notes: {
+                    reason: reason || 'Player cancellation',
+                    tournamentId: tournamentId,
+                    playerId: playerId,
+                    refundPercentage: refundPercentage,
+                    processingFee: processingFee / 100
+                }
+            });
+
+            console.log(`✅ Refund created: ${refund.id}`);
+
+            // Update player document
+            await playerRef.update({
+                refunded: true,
+                refundAmount: refundAmount / 100,
+                refundId: refund.id,
+                refundReason: reason || 'Player cancellation',
+                refundProcessedAt: admin.firestore.FieldValue.serverTimestamp(),
+                refundProcessedBy: request.auth.uid,
+                processingFee: processingFee / 100,
+                refundPercentage: refundPercentage,
+                paid: false, // Mark as unpaid after refund
+                status: 'refunded'
+            });
+
+            // Update tournament totals
+            await tournamentRef.update({
+                totalCollections: admin.firestore.FieldValue.increment(-(paidAmount)),
+                paidPlayerCount: admin.firestore.FieldValue.increment(-1),
+                refundedCount: admin.firestore.FieldValue.increment(1),
+                totalRefunded: admin.firestore.FieldValue.increment(refundAmount / 100)
+            });
+
+            // Create refund transaction record
+            await db.collection('transactions').add({
+                type: 'refund',
+                tournamentId: tournamentId,
+                tournamentName: tournament.name,
+                playerId: playerId,
+                playerName: player.playerName || player.personal?.name,
+                playerEmail: player.email,
+                originalAmount: paidAmount,
+                refundAmount: refundAmount / 100,
+                processingFee: processingFee / 100,
+                refundPercentage: refundPercentage,
+                razorpayPaymentId: razorpayPaymentId,
+                razorpayRefundId: refund.id,
+                reason: reason || 'Player cancellation',
+                status: 'SUCCESS',
+                processedBy: request.auth.uid,
+                createdAt: new Date().toISOString(),
+                updatedAt: admin.firestore.FieldValue.serverTimestamp()
+            });
+
+            // Send refund confirmation email
+            await db.collection('mail').add({
+                to: player.email,
+                template: {
+                    name: 'refund-confirmation',
+                    data: {
+                        playerName: player.playerName || player.personal?.name,
+                        tournamentName: tournament.name,
+                        originalAmount: paidAmount,
+                        refundAmount: refundAmount / 100,
+                        processingFee: processingFee / 100,
+                        refundPercentage: refundPercentage,
+                        refundId: refund.id,
+                        reason: reason || 'Player cancellation'
+                    }
+                }
+            });
+
+            return {
+                success: true,
+                refundId: refund.id,
+                refundAmount: refundAmount / 100,
+                processingFee: processingFee / 100,
+                refundPercentage: refundPercentage,
+                message: `Refund of ₹${refundAmount / 100} processed successfully. ₹${processingFee / 100} processing fee deducted.`
+            };
+
+        } catch (error) {
+            console.error('❌ Refund processing error:', error);
+
+            if (error instanceof HttpsError) {
+                throw error;
+            }
+
+            // Log failed refund attempt
+            await db.collection('refund_logs').add({
+                tournamentId,
+                playerId,
+                error: error.message,
+                timestamp: admin.firestore.FieldValue.serverTimestamp(),
+                requestedBy: request.auth.uid
+            });
+
+            throw new HttpsError('internal', `Refund failed: ${error.message}`);
+        }
+    }
+);
+
+/**
+ * Fetch limited public info about a partner for Duo registration
+ * Used by the joining partner to see who they are joining
+ */
+exports.getPartnerPublicInfo = onCall(
+    {
+        cors: ["http://localhost:8081", "https://force-player-register-ap-ade3a.web.app", "https://force-player-register-ap-ade3a.firebaseapp.com"]
+    },
+    async (request) => {
+        const { tournamentId, playerId } = request.data;
+        if (!tournamentId || !playerId) {
+            throw new HttpsError('invalid-argument', 'Missing tournamentId or playerId');
+        }
+
+        try {
+            const playerDoc = await db.collection('tournaments').doc(tournamentId)
+                .collection('players').doc(playerId).get();
+
+            if (!playerDoc.exists) {
+                throw new HttpsError('not-found', 'Partner registration not found');
+            }
+
+            const data = playerDoc.data();
+
+            // Return only non-sensitive fields
+            return {
+                success: true,
+                playerName: data.playerName,
+                teamName: data.teamName,
+                paidForPartner: data.paidForPartner || false,
+                entryType: data.entryType
+            };
+        } catch (error) {
+            console.error('Error fetching partner info:', error);
+            throw new HttpsError('internal', 'Failed to fetch partner info');
+        }
+    }
+);

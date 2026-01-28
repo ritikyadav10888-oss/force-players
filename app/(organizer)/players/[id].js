@@ -390,7 +390,7 @@ export default function TournamentPlayersScreen() {
                     renderItem={renderItem}
                     keyExtractor={item => item.id}
                     contentContainerStyle={styles.list}
-                    refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
+                    refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} colors={[theme.colors.primary]} />}
                     ListEmptyComponent={
                         <View style={styles.center}>
                             <Text style={{ color: 'gray', marginTop: 50 }}>No registered players yet.</Text>
