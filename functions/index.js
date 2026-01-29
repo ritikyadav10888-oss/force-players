@@ -461,7 +461,11 @@ exports.createPaymentWithRoute = onCall(
             }
 
             const order = await rzp.orders.create(orderOptions);
+            console.log(`✅ Order Created: ${order.id}. Transfers:`, order.transfers ? order.transfers.length : 0);
 
+            if (order.transfers) {
+                console.log(`📡 First Transfer Sample: Account=${order.transfers[0]?.account}, OnHold=${order.transfers[0]?.on_hold}`);
+            }
             console.log(`✅ Order created: ${order.id}${linkedAccountId ? ' (Route)' : ' (Standard)'}`);
             if (linkedAccountId) {
                 console.log(`💰 Route Split: ₹${organizerShare / 100} (held) + ₹${platformCommission / 100} (instant)`);
@@ -534,6 +538,8 @@ exports.releaseSettlement = onCall(
                 .where('settlementHeld', '==', true)
                 .get();
 
+            console.log(`🔍 Found ${transactionsSnap.size} held transactions for tournament ${tournamentId}`);
+
             if (transactionsSnap.empty) {
                 throw new HttpsError('not-found', 'No held settlements found');
             }
@@ -543,6 +549,7 @@ exports.releaseSettlement = onCall(
             const auth = Buffer.from(`${cleanId}:${cleanSecret}`).toString('base64');
             const releasedTransfers = [];
             const failedTransfers = [];
+            let totalReleasedAmount = 0;
 
             // Get transfer IDs from Razorpay orders
             const rzp = getRazorpayInstance({
@@ -558,9 +565,20 @@ exports.releaseSettlement = onCall(
                     // Get order details to find transfer ID
                     if (txn.razorpayOrderId) {
                         const order = await rzp.orders.fetch(txn.razorpayOrderId);
+                        console.log(`📦 Order Fetched: ${order.id}. Transfers in order object: ${order.transfers?.length || 0}`);
 
-                        if (order.transfers && order.transfers.length > 0) {
-                            const transferId = order.transfers[0].id;
+                        let transfersToProcess = order.transfers || [];
+
+                        // Fallback: Fetch transfers explicitly if not in order object
+                        if (transfersToProcess.length === 0) {
+                            console.log(`📡 Fetching transfers via rzp.transfers.all for ${txn.razorpayOrderId}`);
+                            const tResult = await rzp.transfers.all({ order_id: txn.razorpayOrderId });
+                            transfersToProcess = tResult.items || [];
+                        }
+
+                        if (transfersToProcess.length > 0) {
+                            const transferId = transfersToProcess[0].id;
+                            console.log(`🔓 Attempting release for transferId: ${transferId}`);
 
                             // Release the transfer
                             const response = await fetch(`https://api.razorpay.com/v1/transfers/${transferId}`, {
@@ -577,6 +595,9 @@ exports.releaseSettlement = onCall(
                             if (response.ok) {
                                 const transfer = await response.json();
                                 releasedTransfers.push(transfer.id);
+
+                                const releaseAmt = txn.organizerShare || (txn.amount * 0.95) || 0;
+                                totalReleasedAmount += releaseAmt;
 
                                 // Update transaction
                                 await txnDoc.ref.update({
@@ -603,11 +624,15 @@ exports.releaseSettlement = onCall(
             }
 
             // Update tournament
+            const finalStatus = (failedTransfers.length === 0 && releasedTransfers.length > 0) ? 'released' :
+                (releasedTransfers.length > 0 ? 'partial_release' : 'failed');
+
             await tournamentRef.update({
-                settlementStatus: releasedTransfers.length > 0 ? 'released' : 'failed',
+                settlementStatus: finalStatus,
                 settlementReleasedAt: admin.firestore.FieldValue.serverTimestamp(),
                 settlementReleasedBy: request.auth.uid,
-                totalHeldAmount: 0,
+                totalHeldAmount: admin.firestore.FieldValue.increment(-totalReleasedAmount),
+                totalReleasedAmount: admin.firestore.FieldValue.increment(totalReleasedAmount),
                 updatedAt: admin.firestore.FieldValue.serverTimestamp()
             });
 
@@ -846,6 +871,9 @@ exports.verifyPayment = onCall(
             playerId,
             transactionId
         } = request.data;
+        console.log(`🕵️ verifyPayment incoming: tid=${tournamentId}, pid=${playerId}, payid=${razorpay_payment_id}, ordid=${razorpay_order_id}`);
+
+        let playerDoc = null;
 
         // SECURITY: Comprehensive Input Validation
         if (!razorpay_payment_id || typeof razorpay_payment_id !== 'string') {
@@ -888,7 +916,7 @@ exports.verifyPayment = onCall(
                     .digest('hex');
 
                 isSignatureValid = expectedSignature === razorpay_signature;
-                console.log(`📝 Signature verification: ${isSignatureValid ? '✅ VALID' : '❌ INVALID'}`);
+                console.log(`📝 Signature: Expected=${expectedSignature.substring(0, 10)}..., Got=${razorpay_signature.substring(0, 10)}... Result=${isSignatureValid}`);
 
                 if (!isSignatureValid) {
                     // Log the failed verification attempt
@@ -920,21 +948,30 @@ exports.verifyPayment = onCall(
                 throw new HttpsError('failed-precondition', `Payment not captured. Status: ${payment.status}`);
             }
 
-            // SECURITY: Verify payment amount matches tournament fee
+            // SECURITY: Verify payment amount matches player's expected amount
             const finalTournamentId = tournamentId || payment.notes?.tournamentId;
-            if (finalTournamentId) {
-                const tournamentDoc = await db.collection('tournaments').doc(finalTournamentId).get();
-                if (tournamentDoc.exists) {
-                    const expectedAmount = tournamentDoc.data()?.entryFee || 0;
-                    const paidAmount = payment.amount / 100;
+            let finalPlayerId = playerId || payment.notes?.playerId;
 
-                    if (Math.abs(paidAmount - expectedAmount) > 0.01) {
+            if (finalTournamentId && finalPlayerId) {
+                const playerRef = db.collection('tournaments').doc(finalTournamentId)
+                    .collection('players').doc(finalPlayerId);
+                playerDoc = await playerRef.get();
+
+                if (playerDoc.exists) {
+                    const playerData = playerDoc.data();
+                    const expectedAmount = playerData.paidAmount || 0;
+                    const paidAmount = payment.amount / 100;
+                    console.log(`💰 Amount Comparison: Expected=${expectedAmount}, Paid=${paidAmount}`);
+
+                    if (expectedAmount > 0 && Math.abs(paidAmount - expectedAmount) > 0.01) {
                         console.error(`❌ Amount mismatch: expected ₹${expectedAmount}, got ₹${paidAmount}`);
                         await db.collection('payment_verification_logs').add({
                             razorpay_payment_id,
                             status: 'AMOUNT_MISMATCH',
                             expectedAmount,
                             paidAmount,
+                            tournamentId: finalTournamentId,
+                            playerId: finalPlayerId,
                             timestamp: admin.firestore.FieldValue.serverTimestamp()
                         });
                         throw new HttpsError('invalid-argument',
@@ -958,7 +995,7 @@ exports.verifyPayment = onCall(
             }
 
             // Step 4: Extract tournament and player info from payment notes or parameters
-            const finalPlayerId = playerId || payment.notes?.playerId;
+            // finalPlayerId already resolved above in Security step
 
             if (!finalTournamentId || !finalPlayerId) {
                 console.warn('⚠️ Missing tournament/player ID in verification');
@@ -971,8 +1008,19 @@ exports.verifyPayment = onCall(
                     const order = await rzp.orders.fetch(razorpay_order_id);
                     if (order.transfers && order.transfers.length > 0) {
                         transferId = order.transfers[0].id;
-                        console.log(`🔗 Transfer ID found: ${transferId}`);
+                        console.log(`🔗 Extracted transferId: ${transferId} from order object`);
+                    } else {
+                        // Fallback: Fetch transfers explicitly for this order
+                        console.log(`📡 Order transfers missing, fetching from rzp.transfers.all for ${razorpay_order_id}`);
+                        const transfersResponse = await rzp.transfers.all({ order_id: razorpay_order_id });
+                        if (transfersResponse.items && transfersResponse.items.length > 0) {
+                            transferId = transfersResponse.items[0].id;
+                            console.log(`🔗 Found transferId via fallback: ${transferId}`);
+                        } else {
+                            console.warn(`⚠️ No transfers found for order: ${razorpay_order_id} even in fallback`);
+                        }
                     }
+                    console.log(`🔗 Final transferId status: ${transferId ? 'Found' : 'Not Found'}. Value: ${transferId}`);
                 } catch (err) {
                     console.warn('⚠️ Could not fetch order transfers:', err.message);
                 }
@@ -985,9 +1033,14 @@ exports.verifyPayment = onCall(
             if (finalTournamentId && finalPlayerId) {
                 const playerRef = db.collection('tournaments').doc(finalTournamentId)
                     .collection('players').doc(finalPlayerId);
-                const playerDoc = await playerRef.get();
 
-                if (playerDoc.exists && !playerDoc.data().paid) {
+                // Ensure playerDoc is available (fallback if skipped in security step)
+                if (!playerDoc) {
+                    console.log(`📡 Fetching playerDoc in Step 6 fallback for ${finalPlayerId}`);
+                    playerDoc = await playerRef.get();
+                }
+
+                if (playerDoc && playerDoc.exists && !playerDoc.data().paid) {
                     batch.update(playerRef, {
                         paid: true,
                         paymentId: razorpay_payment_id,

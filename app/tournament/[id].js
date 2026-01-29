@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { View, StyleSheet, ScrollView, Alert, Image, KeyboardAvoidingView, Platform, Dimensions, ImageBackground, TouchableOpacity, Linking, Share } from 'react-native';
 import { TextInput, Button, Title, Text, Surface, useTheme, Avatar, Divider, Modal, Portal, RadioButton, ActivityIndicator, ProgressBar, Chip, SegmentedButtons, List, Menu, Badge, IconButton } from 'react-native-paper';
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import { doc, getDoc, addDoc, setDoc, collection, query, where, getDocs, arrayUnion, updateDoc, increment, onSnapshot } from 'firebase/firestore';
+import { doc, getDoc, addDoc, setDoc, collection, query, where, getDocs, arrayUnion, updateDoc, increment, onSnapshot, getCountFromServer } from 'firebase/firestore';
 import { ref, uploadBytes, getDownloadURL, uploadString } from 'firebase/storage';
 import { signInAnonymously } from 'firebase/auth';
 import { db, storage, auth, functions } from '../../src/config/firebase';
@@ -179,6 +179,8 @@ export default function TournamentRegistrationScreen() {
     const [activeDropdown, setActiveDropdown] = useState(null); // Tracks open menu, e.g., 'main_jersey'
     const [teamCounts, setTeamCounts] = useState({}); // Current enrollment per team
     const [fetchingCounts, setFetchingCounts] = useState(false);
+    const [hybridCounts, setHybridCounts] = useState({ solo: 0, duo: 0 }); // For Hybrid Stats
+    const [hybridLimits, setHybridLimits] = useState({ maxSolo: 0, maxDuo: 0 }); // Limits
     const [formErrors, setFormErrors] = useState({}); // Stores validation errors by field key
     const [agreedToTerms, setAgreedToTerms] = useState(false); // Player must agree to T&C to proceed
 
@@ -357,6 +359,39 @@ export default function TournamentRegistrationScreen() {
         init();
     }, [id]);
 
+    const fetchHybridCounts = async (tId) => {
+        try {
+            const playersRef = collection(db, 'tournaments', tId, 'players');
+
+            // Count Paid Solo Players
+            const soloQ = query(playersRef,
+                where('entryType', '==', 'Solo'),
+                where('paid', '==', true)
+            );
+            const soloSnap = await getCountFromServer(soloQ);
+
+            // Count Paid Duo Players (Each pair entry is one document usually, but check logic. 
+            // In typical Duo implementation, we register ONE document for the pair or one for each?
+            // create-tournament says "Max Duo Pairs", and registration creates 1 doc for the payer with 'partnerDuoId'.
+            // So counting docs with entryType='Duo' && isDuoSource=true (or just primary registrant) represents pairs.
+            // Let's assume entryType='Duo' filters correctly for the main registration doc.
+
+            const duoQ = query(playersRef,
+                where('entryType', '==', 'Duo'),
+                where('isDuoSource', '==', true),
+                where('paid', '==', true)
+            );
+            const duoSnap = await getCountFromServer(duoQ);
+
+            setHybridCounts({
+                solo: soloSnap.data().count,
+                duo: duoSnap.data().count
+            });
+        } catch (err) {
+            console.error("Error counting hybrid entries:", err);
+        }
+    };
+
     // Load Draft
     const loadDraft = async () => {
         try {
@@ -481,6 +516,15 @@ export default function TournamentRegistrationScreen() {
                 const data = docSnap.data();
                 setTournament(data);
 
+                // Initialize Hybrid Limits
+                if (data.entryType === 'Hybrid') {
+                    setHybridLimits({
+                        maxSolo: data.maxSolo || 0,
+                        maxDuo: data.maxDuo || 0
+                    });
+                    fetchHybridCounts(id);
+                }
+
                 // Removed per-team count query as it requires elevated permissions and causes console noise for guests.
                 // Registrations will still work; this data is only for UI decorators.
 
@@ -499,9 +543,10 @@ export default function TournamentRegistrationScreen() {
             console.error("Error fetching tournament:", error);
         } finally {
             if (duoId) {
+                const cleanDuoId = String(duoId).trim();
                 try {
                     const getPartnerPublicInfo = httpsCallable(functions, 'getPartnerPublicInfo');
-                    const result = await getPartnerPublicInfo({ tournamentId: id, playerId: duoId });
+                    const result = await getPartnerPublicInfo({ tournamentId: id, playerId: cleanDuoId });
 
                     if (result.data && result.data.success) {
                         const dData = result.data;
@@ -847,14 +892,14 @@ export default function TournamentRegistrationScreen() {
             const verificationResult = await TransactionService.verifyPayment({
                 ...paymentResponse,
                 tournamentId: id,
-                playerId: playerId,
+                playerId: finalPlayerIdStr,
                 transactionId: transactionId
             });
 
             if (verificationResult.success || verificationResult.status === 'captured') {
                 console.log("✅ Payment Verified Successfully");
                 setPaymentStatus('success');
-                setRegistrationId(playerId); // Using document ID as registration ID reference
+                setRegistrationId(finalPlayerIdStr); // Using document ID as registration ID reference
 
                 // Show success poster after short delay
                 setTimeout(() => {
@@ -1043,6 +1088,44 @@ export default function TournamentRegistrationScreen() {
             console.log("Authenticated as:", currentUser.uid);
             console.log("Proceeding with User ID:", currentUser?.uid);
 
+
+            // 0.5 Check Limits (Last Mile Check for Hybrid)
+            if (tournament.entryType === 'Hybrid' && !isAlreadyRegistered && !duoId) {
+                const currentMode = formData.registrationMode; // 'Solo' or 'Duo'
+                const playersRef = collection(db, 'tournaments', id, 'players');
+
+                if (currentMode === 'Solo') {
+                    if (hybridLimits.maxSolo === 0) {
+                        throw new Error("Solo registration is currently closed for this tournament.");
+                    }
+                    if (hybridLimits.maxSolo > 0) {
+                        const q = query(playersRef, where('entryType', '==', 'Solo'), where('paid', '==', true));
+                        const snap = await getCountFromServer(q);
+                        const currentCount = snap.data().count;
+                        console.log(`📊 Solo Check: ${currentCount} / ${hybridLimits.maxSolo}`);
+                        if (currentCount >= hybridLimits.maxSolo) {
+                            throw new Error("Solo registration is full! The limit has just been reached.");
+                        }
+                    }
+                }
+
+                if (currentMode === 'Duo') {
+                    if (hybridLimits.maxDuo === 0) {
+                        throw new Error("Duo registration is currently closed for this tournament.");
+                    }
+                    if (hybridLimits.maxDuo > 0) {
+                        // Count Duo TEAMS (only where isDuoSource is true)
+                        const q = query(playersRef, where('entryType', '==', 'Duo'), where('isDuoSource', '==', true), where('paid', '==', true));
+                        const snap = await getCountFromServer(q);
+                        const teamCount = snap.data().count;
+                        console.log(`📊 Duo Team Check: ${teamCount} / ${hybridLimits.maxDuo}`);
+                        if (teamCount >= hybridLimits.maxDuo) {
+                            throw new Error("Duo registration is full! The limit has just been reached.");
+                        }
+                    }
+                }
+            }
+
             // Final check just in case (Email & Phone)
             const playerCol = collection(db, 'tournaments', id, 'players');
             const emailQ = query(playerCol, where('email', '==', formData.email.toLowerCase().trim()));
@@ -1066,6 +1149,21 @@ export default function TournamentRegistrationScreen() {
 
                     // Set the registration ID so user can see it
                     setRegistrationId(existingData.registrationNumber);
+                    setRegistrationDocId(existingDocId);
+
+                    // Check if we need to link this existing registration to a duo
+                    if (duoId && !existingData.partnerDuoId) {
+                        const cleanDuoId = String(duoId).trim();
+                        console.log("🔗 Linking existing registration to duoId:", cleanDuoId);
+                        try {
+                            await updateDoc(doc(db, 'tournaments', id, 'players', existingDocId), {
+                                partnerDuoId: cleanDuoId,
+                                entryType: 'Duo'
+                            });
+                        } catch (linkErr) {
+                            console.warn("⚠️ Failed to link existing registration to Duo:", linkErr.message);
+                        }
+                    }
 
                     // Save pending payment for recovery
                     await savePendingPayment({
@@ -1207,7 +1305,7 @@ export default function TournamentRegistrationScreen() {
             const playerImgUrl = await uploadImage(formData.playerImage, `players/${sanitizedEmail}/profile_${timestamp}.jpg`);
             const adharImgUrl = await uploadImage(formData.adharImage, `players/${sanitizedEmail}/adhar_${timestamp}.jpg`);
 
-            let finalTeamLogo = null;
+            let finalTeamLogo = formData.teamLogo;
             if (formData.teamLogo && !formData.teamLogo.startsWith('http')) {
                 finalTeamLogo = await uploadImage(formData.teamLogo, `tournaments/${id}/teams/${Date.now()}_logo.jpg`);
             }
@@ -1216,12 +1314,20 @@ export default function TournamentRegistrationScreen() {
             if ((formData.registrationMode === 'Team' || tournament.entryType === 'Duo') && formData.teamMembers.length > 0) {
                 for (const member of formData.teamMembers) {
                     if (member.name && (member.email || member.phone)) {
-                        let memberProfile = { ...member };
-                        if (member.playerImage && !member.playerImage.startsWith('http')) {
-                            memberProfile.playerImgUrl = await uploadImage(member.playerImage, `players/${member.email || member.phone}/profile_${Date.now()}.jpg`);
+                        // Strip raw image data to prevent document size explosion
+                        const { playerImage, adharImage, ...memberData } = member;
+                        let memberProfile = { ...memberData };
+
+                        if (playerImage && !playerImage.startsWith('http')) {
+                            memberProfile.playerImgUrl = await uploadImage(playerImage, `players/${member.email || member.phone}/profile_${Date.now()}.jpg`);
+                        } else if (playerImage) {
+                            memberProfile.playerImgUrl = playerImage;
                         }
-                        if (member.adharImage && !member.adharImage.startsWith('http')) {
-                            memberProfile.adharImgUrl = await uploadImage(member.adharImage, `players/${member.email || member.phone}/adhar_${Date.now()}.jpg`);
+
+                        if (adharImage && !adharImage.startsWith('http')) {
+                            memberProfile.adharImgUrl = await uploadImage(adharImage, `players/${member.email || member.phone}/adhar_${Date.now()}.jpg`);
+                        } else if (adharImage) {
+                            memberProfile.adharImgUrl = adharImage;
                         }
                         processedMembers.push(memberProfile);
                     }
@@ -1275,6 +1381,7 @@ export default function TournamentRegistrationScreen() {
             };
 
             console.log("📝 Step 1: Writing to Player Subcollection...");
+            console.log("Payload Sample:", JSON.stringify({ ...registrationDoc, data: 'TRUNCATED' }, null, 2));
             let docRef;
             try {
                 docRef = await addDoc(collection(db, 'tournaments', id, 'players'), registrationDoc);
@@ -1429,7 +1536,7 @@ export default function TournamentRegistrationScreen() {
                 const mailRef = await addDoc(collection(db, 'mail'), emailData);
                 console.log("✅ Registration confirmation email queued successfully!", mailRef.id);
             } catch (emailError) {
-                console.warn("⚠️ Failed to queue registration email (ignoring):", emailError.message);
+                console.warn("❌ Email Queue Failed:", emailError.message);
                 // Don't block registration if email fails
             }
 
@@ -1449,6 +1556,7 @@ export default function TournamentRegistrationScreen() {
 
             // 7. Update Master Records (Optional - might fail for guests)
             try {
+                console.log("👤 Step 3: Updating Master Profile...");
                 const masterRef = doc(db, 'master_players', formData.email.toLowerCase().trim());
                 await setDoc(masterRef, {
                     ...profileData,
@@ -1460,8 +1568,9 @@ export default function TournamentRegistrationScreen() {
                         role: formData.registrationMode === 'Team' ? 'Captain' : 'Player'
                     })
                 }, { merge: true });
+                console.log("✅ Master profile updated!");
             } catch (masterErr) {
-                console.warn("⚠️ Master profile update skipped:", masterErr.message);
+                console.warn("❌ Master Profile Update Failed:", masterErr.message);
             }
 
             await AsyncStorage.removeItem(`draft_${id}`);
@@ -1704,7 +1813,7 @@ export default function TournamentRegistrationScreen() {
                                         }}
                                     >
                                         {existingRegistration?.paid
-                                            ? (existingRegistration?.registrationMode === 'Duo'
+                                            ? (existingRegistration?.entryType === 'Duo'
                                                 ? (existingRegistration?.paidForPartner ? "PAID (FULL DUO)" : "PAID (INDIVIDUAL)")
                                                 : "PAID")
                                             : "PENDING"}
@@ -1717,6 +1826,34 @@ export default function TournamentRegistrationScreen() {
                                     <MaterialCommunityIcons name="phone" size={16} color={theme.colors.primary} />
                                     <Text style={{ marginLeft: 5, color: theme.colors.primary, fontWeight: 'bold' }}>{organizerInfo?.phone || 'N/A'}</Text>
                                 </TouchableOpacity>
+
+                                {/* Duo Share Link for existing paid registrations */}
+                                {existingRegistration?.paid &&
+                                    existingRegistration?.entryType === 'Duo' &&
+                                    existingRegistration?.isDuoSource && (
+                                        <View style={{ marginTop: 15, padding: 12, backgroundColor: '#E3F2FD', borderRadius: 8, borderTopWidth: 1, borderTopColor: '#BBDEFB' }}>
+                                            <Text style={{ fontWeight: 'bold', fontSize: 13, color: '#1A237E' }}>Duo Partner Link</Text>
+                                            <Text style={{ fontSize: 11, color: '#555', marginVertical: 4 }}>Share this with your partner to link their registration.</Text>
+                                            <Button
+                                                mode="contained-tonal"
+                                                compact
+                                                icon="share-variant"
+                                                onPress={() => {
+                                                    const domain = Platform.OS === 'web' ? window.location.origin : 'https://force-player-register-ap-ade3a.web.app';
+                                                    const shareUrl = `${domain}/tournament/${id}?duoId=${existingRegistration.id || existingRegistration.docId}`;
+                                                    Share.share({
+                                                        message: existingRegistration.paidForPartner
+                                                            ? `Hey! I've paid for our Duo in ${tournament.name}. Register yourself for FREE here: ${shareUrl}`
+                                                            : `Hey! I've registered for ${tournament.name}. Join my duo here: ${shareUrl}`,
+                                                        url: shareUrl
+                                                    });
+                                                }}
+                                                style={{ marginTop: 5, borderRadius: 6 }}
+                                            >
+                                                Share with Partner
+                                            </Button>
+                                        </View>
+                                    )}
                             </View>
 
                             {/* Complete Payment Button for Pending Registrations */}
@@ -2012,15 +2149,15 @@ export default function TournamentRegistrationScreen() {
                                         buttons={[
                                             {
                                                 value: 'Solo',
-                                                label: 'Solo',
+                                                label: (tournament.entryType === 'Hybrid' && hybridLimits.maxSolo > 0 && hybridCounts.solo >= hybridLimits.maxSolo) ? 'Solo (Full)' : 'Solo',
                                                 icon: 'account',
-                                                disabled: !!duoId || tournament.tournamentType === 'Team' || GAME_TYPE_MAPPING[tournament.gameName] === 'Team'
+                                                disabled: !!duoId || tournament.tournamentType === 'Team' || GAME_TYPE_MAPPING[tournament.gameName] === 'Team' || (tournament.entryType === 'Hybrid' && hybridLimits.maxSolo > 0 && hybridCounts.solo >= hybridLimits.maxSolo)
                                             },
                                             {
                                                 value: 'Duo',
-                                                label: 'Duo',
+                                                label: (tournament.entryType === 'Hybrid' && hybridLimits.maxDuo > 0 && hybridCounts.duo >= hybridLimits.maxDuo) ? 'Duo (Full)' : 'Duo',
                                                 icon: 'account-multiple',
-                                                disabled: (!!duoId && formData.registrationMode !== 'Duo') || tournament.tournamentType === 'Team' || tournament.tournamentType === 'Auction' || GAME_TYPE_MAPPING[tournament.gameName] === 'Solo' || GAME_TYPE_MAPPING[tournament.gameName] === 'Team'
+                                                disabled: (!!duoId && formData.registrationMode !== 'Duo') || tournament.tournamentType === 'Team' || tournament.tournamentType === 'Auction' || GAME_TYPE_MAPPING[tournament.gameName] === 'Solo' || GAME_TYPE_MAPPING[tournament.gameName] === 'Team' || (tournament.entryType === 'Hybrid' && hybridLimits.maxDuo > 0 && hybridCounts.duo >= hybridLimits.maxDuo)
                                             },
                                             {
                                                 value: 'Team',

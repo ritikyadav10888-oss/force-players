@@ -26,7 +26,8 @@ const GAMES_DATA = [
 const TEAM_FORMATS = [
     { value: 'Solo', label: 'Solo' },
     { value: 'Duo', label: 'Duo' },
-    { value: 'Team', label: 'Team' }
+    { value: 'Team', label: 'Team' },
+    { value: 'Hybrid', label: 'Hybrid' }
 ];
 
 const TOURNAMENT_TYPES = [
@@ -155,12 +156,13 @@ const GAME_ENTRY_CONFIG = {
     "Polo": ["Team"],
 
     // Solo & Duo Games
-    "Badminton": ["Solo", "Duo"],
-    "Table Tennis": ["Solo", "Duo"],
-    "Tennis": ["Solo", "Duo"],
-    "Carrom": ["Solo", "Duo"],
-    "Squash": ["Solo", "Duo"],
-    "Pickleball": ["Solo", "Duo"],
+    // Solo & Duo Games
+    "Badminton": ["Solo", "Hybrid"],
+    "Table Tennis": ["Solo", "Hybrid"],
+    "Tennis": ["Solo", "Hybrid"],
+    "Carrom": ["Solo", "Hybrid"],
+    "Squash": ["Solo", "Hybrid"],
+    "Pickleball": ["Solo", "Hybrid"],
 
     // Solo Only Games
     "Chess": ["Solo"],
@@ -180,7 +182,7 @@ export default function CreateTournamentScreen() {
     const router = useRouter();
     const params = useLocalSearchParams();
     const theme = useTheme();
-    const { user } = useAuth(); // Owner
+    const { user, userData } = useAuth(); // Owner
 
     const [name, setName] = useState('');
     const [gameName, setGameName] = useState('Cricket');
@@ -190,6 +192,8 @@ export default function CreateTournamentScreen() {
     const [entryType, setEntryType] = useState('Team'); // Solo, Duo, Team (Default Team for Cricket)
     const [teamSize, setTeamSize] = useState(''); // For 'Team' entry
     const [maxTeams, setMaxTeams] = useState('0'); // Limit for Team-Based tournaments
+    const [maxSolo, setMaxSolo] = useState(''); // Limit for Hybrid Solo
+    const [maxDuo, setMaxDuo] = useState(''); // Limit for Hybrid Duo
     const [termsAndConditions, setTermsAndConditions] = useState(''); // Custom T&C Policy
 
     // Logic: Enforce Entry Types based on Game and Tournament Type
@@ -363,6 +367,10 @@ export default function CreateTournamentScreen() {
                 setTermsAndConditions(data.termsAndConditions || '');
                 setWinningPrize(data.winningPrize);
                 setMaxTeams(String(data.maxTeams || '0'));
+                if (data.entryType === 'Hybrid') {
+                    setMaxSolo(String(data.maxSolo || ''));
+                    setMaxDuo(String(data.maxDuo || ''));
+                }
 
                 // Dates
                 if (data.startDate) setStartDate(new Date(data.startDate));
@@ -457,7 +465,9 @@ export default function CreateTournamentScreen() {
         try {
             let storagePath = pathSuffix;
             if (!storagePath) {
-                storagePath = `tournament_banners/${Date.now()}.jpg`;
+                // Use a path that validates against: match /tournaments/{tournamentId}/{allPaths=**}
+                // 'banners' acts as the {tournamentId} segment here, which is fine for the rule
+                storagePath = `tournaments/banners/${Date.now()}.jpg`;
             }
 
             const storageRef = ref(storage, storagePath);
@@ -472,7 +482,6 @@ export default function CreateTournamentScreen() {
             await uploadBytes(storageRef, blob);
             return await getDownloadURL(storageRef);
         } catch (error) {
-            console.error("Image upload failed:", error);
             throw error;
         }
     };
@@ -528,6 +537,19 @@ export default function CreateTournamentScreen() {
         if (tournamentType === 'Team') {
             if (!maxTeams || isNaN(Number(maxTeams)) || Number(maxTeams) <= 0) {
                 errors.maxTeams = 'Max Number of Teams must be a positive number';
+            }
+        } else if (entryType === 'Hybrid') {
+            const solo = Number(maxSolo);
+            const duo = Number(maxDuo);
+
+            if (isNaN(solo) || solo < 0) {
+                errors.maxSolo = 'Max Solo Participants cannot be negative';
+            }
+            if (isNaN(duo) || duo < 0) {
+                errors.maxDuo = 'Max Duo Pairs cannot be negative';
+            }
+            if (!errors.maxSolo && !errors.maxDuo && (solo + duo === 0)) {
+                errors.maxSolo = 'At least one of Solo or Duo limits must be greater than 0';
             }
         } else {
             if (!maxParticipants || isNaN(Number(maxParticipants)) || Number(maxParticipants) <= 0) {
@@ -592,8 +614,12 @@ export default function CreateTournamentScreen() {
         setLoading(true);
         try {
             let bannerUrl = bannerImage;
-            if (bannerImage && !bannerImage.startsWith('http')) {
-                bannerUrl = await uploadImage(bannerImage);
+            try {
+                if (bannerImage && !bannerImage.startsWith('http')) {
+                    bannerUrl = await uploadImage(bannerImage);
+                }
+            } catch (uploadErr) {
+                throw new Error(`Image Upload Failed: ${uploadErr.message}`);
             }
 
             // Process Teams based on Tournament Type
@@ -604,7 +630,8 @@ export default function CreateTournamentScreen() {
                     finalTeams = await Promise.all(teamsData.map(async (team, index) => {
                         let logoUrl = team.logo;
                         if (team.logo && !team.logo.startsWith('http')) {
-                            logoUrl = await uploadImage(team.logo, `tournaments/teams/${Date.now()}_${index}.jpg`);
+                            // Path must match /tournaments/{id}/teams/{file}
+                            logoUrl = await uploadImage(team.logo, `tournaments/temp/teams/${Date.now()}_${index}.jpg`);
                         }
                         return {
                             name: team.name || `Team ${index + 1}`,
@@ -614,17 +641,23 @@ export default function CreateTournamentScreen() {
                 }
             }
 
+            if (!selectedOrganizer || !selectedOrganizer.id) {
+                throw new Error("Invalid Organizer Selection: Missing ID");
+            }
+
             const payload = {
                 name,
                 gameName: finalGameName,
                 gameCategory,
                 tournamentType, // Normal / Auction / Team
-                entryType,      // Solo / Duo / Team
+                entryType,      // Solo / Duo / Team / Hybrid
                 teamSize: entryType === 'Team' ? Number(teamSize) : (entryType === 'Duo' ? 2 : 1),
                 maxTeams: tournamentType === 'Team' ? Number(maxTeams) : 0,
+                maxSolo: entryType === 'Hybrid' ? Number(maxSolo) : 0,
+                maxDuo: entryType === 'Hybrid' ? Number(maxDuo) : 0,
                 bannerUrl: bannerUrl || null,
                 entryFee: Number(entryFee),
-                maxParticipants: tournamentType === 'Team' ? Number(maxTeams) : (maxParticipants ? Number(maxParticipants) : 100),
+                maxParticipants: tournamentType === 'Team' ? Number(maxTeams) : (entryType === 'Hybrid' ? (Number(maxSolo) + Number(maxDuo) * 2) : (maxParticipants ? Number(maxParticipants) : 100)),
                 description,
                 address,
                 rules,
@@ -649,18 +682,20 @@ export default function CreateTournamentScreen() {
                 delete payload.createdAt;
                 delete payload.status;
                 await updateDoc(docRef, payload);
-                Alert.alert('Success', 'Tournament Updated!');
+                Alert.alert('Success', 'Tournament Updated!', [
+                    { text: 'OK', onPress: () => router.back() }
+                ]);
             } else {
                 // Create
                 payload.createdBy = user.uid;
                 payload.createdAt = new Date().toISOString();
                 await addDoc(collection(db, 'tournaments'), payload);
-                Alert.alert('Success', 'Tournament Created and Assigned!');
+                Alert.alert('Success', 'Successfully tournament created', [
+                    { text: 'OK', onPress: () => router.back() }
+                ]);
             }
-
-            router.back();
         } catch (error) {
-            Alert.alert('Error', error.message);
+            Alert.alert('Error', `Failed to save tournament: ${error.message}`);
         } finally {
             setLoading(false);
         }
@@ -812,9 +847,9 @@ export default function CreateTournamentScreen() {
                                 disabled: tournamentType === 'Team' || (tournamentType === 'Normal' && gameName !== 'Other' && !GAME_ENTRY_CONFIG[gameName]?.includes('Solo'))
                             },
                             {
-                                value: 'Duo',
-                                label: 'Duo',
-                                disabled: tournamentType === 'Auction' || tournamentType === 'Team' || (tournamentType === 'Normal' && gameName !== 'Other' && !GAME_ENTRY_CONFIG[gameName]?.includes('Duo'))
+                                value: 'Hybrid',
+                                label: 'Hybrid (Solo & Duo)',
+                                disabled: tournamentType === 'Auction' || tournamentType === 'Team' || (tournamentType === 'Normal' && gameName !== 'Other' && !GAME_ENTRY_CONFIG[gameName]?.includes('Hybrid'))
                             },
                             {
                                 value: 'Team',
@@ -854,7 +889,7 @@ export default function CreateTournamentScreen() {
 
 
 
-                    {tournamentType !== 'Team' && (
+                    {tournamentType !== 'Team' && entryType !== 'Hybrid' && (
                         <TextInput
                             label={entryType === 'Team' ? "Max Teams (Total Slots)" : (entryType === 'Duo' ? "Max Duo Players (Total Slots)" : "Max Solo Players (Total Slots)")}
                             value={maxParticipants}
@@ -866,6 +901,33 @@ export default function CreateTournamentScreen() {
                             error={!!fieldErrors.maxParticipants}
                             left={<TextInput.Icon icon={() => <MaterialCommunityIcons name="account-group" size={20} color="gray" />} />}
                         />
+                    )}
+
+                    {entryType === 'Hybrid' && (
+                        <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
+                            <TextInput
+                                label="Max Solo Entries"
+                                value={maxSolo}
+                                onChangeText={setMaxSolo}
+                                keyboardType="numeric"
+                                mode="outlined"
+                                style={[styles.input, { flex: 1, marginRight: 5, marginBottom: 15 }]}
+                                placeholder="Ex: 32"
+                                error={!!fieldErrors.maxSolo}
+                                left={<TextInput.Icon icon={() => <MaterialCommunityIcons name="account" size={20} color="gray" />} />}
+                            />
+                            <TextInput
+                                label="Max Duo Pairs"
+                                value={maxDuo}
+                                onChangeText={setMaxDuo}
+                                keyboardType="numeric"
+                                mode="outlined"
+                                style={[styles.input, { flex: 1, marginLeft: 5, marginBottom: 15 }]}
+                                placeholder="Ex: 16"
+                                error={!!fieldErrors.maxDuo}
+                                left={<TextInput.Icon icon={() => <MaterialCommunityIcons name="account-group" size={20} color="gray" />} />}
+                            />
+                        </View>
                     )}
 
                     {/* Team Configuration (For Normal + Team and Team-Based Type) */}

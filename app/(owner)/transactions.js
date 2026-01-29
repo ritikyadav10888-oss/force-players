@@ -255,8 +255,24 @@ export default function TransactionsScreen() {
                 groupedArray.map((group) => {
                     const isExpanded = expandedTournaments[group.id];
                     const groupStats = group.txns.reduce((acc, t) => {
-                        if (t.type === 'collection' && t.status === 'SUCCESS') acc.collected += (t.amount || 0);
-                        if (t.type === 'payout' && t.status === 'SUCCESS') acc.paid += (t.amount || 0);
+                        // Total Collected: Sum of all successful collection transactions
+                        if (t.type === 'collection' && t.status === 'SUCCESS') {
+                            acc.collected += (t.amount || 0);
+                        }
+
+                        // Total Settled (Paid to Organizer):
+                        // 1. Direct 'payout' transactions (Manual Payouts)
+                        if (t.type === 'payout' && t.status === 'SUCCESS') {
+                            acc.paid += (t.amount || 0);
+                        }
+                        // 2. Released Route Settlements (embedded in collections)
+                        // If a collection transaction is marked as 'settlementHeld: false' or has a 'transferId', it means it has been released to the organizer account.
+                        // We count 95% of this amount as "Settled" (since 5% is platform fee).
+                        else if (t.type === 'collection' && t.status === 'SUCCESS' && (t.settlementHeld === false || t.transferId)) {
+                            // Route settlements are typically 95% of the collected amount
+                            acc.paid += ((t.amount || 0) * 0.95);
+                        }
+
                         return acc;
                     }, { collected: 0, paid: 0 });
 

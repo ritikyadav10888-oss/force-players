@@ -115,7 +115,12 @@ export default function TournamentSettlementScreen() {
             );
             const playersSnap = await getDocs(playersQuery);
 
-            const totalCollected = playersSnap.size * (tournamentData.entryFee || 0);
+            // Calculate financials accurately by summing actual paid amounts
+            let totalCollected = 0;
+            playersSnap.forEach(doc => {
+                totalCollected += (doc.data().paidAmount || tournamentData.entryFee || 0);
+            });
+
             const platformCommission = totalCollected * 0.05;
             const organizerShare = totalCollected - platformCommission;
 
@@ -386,8 +391,7 @@ export default function TournamentSettlementScreen() {
             console.error('Release error:', error);
             Alert.alert('Error', error.message || 'Failed to release settlements');
         } finally {
-            setProcessing(true);
-            setTimeout(() => setProcessing(false), 2000); // Prevent double-tap
+            setProcessing(false);
         }
     };
 
@@ -412,13 +416,20 @@ export default function TournamentSettlementScreen() {
         <ScrollView style={styles.container}>
             {/* Header */}
             <Card style={styles.card}>
-                <Card.Content>
-                    <Text variant="headlineSmall" style={styles.tournamentName}>
-                        {tournament.name}
-                    </Text>
-                    <Text variant="bodyMedium" style={{ color: '#666', marginTop: 5 }}>
-                        {tournament.gameName}
-                    </Text>
+                <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <View>
+                        <Text variant="headlineSmall" style={styles.tournamentName}>
+                            {tournament.name}
+                        </Text>
+                        <Text variant="bodyMedium" style={{ color: '#666', marginTop: 5 }}>
+                            {tournament.gameName}
+                        </Text>
+                    </View>
+                    <Button icon="sync" mode="outlined" onPress={fetchData} loading={loading}>
+                        Refresh
+                    </Button>
+                </View>
+                <View style={{ marginTop: 10, flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
                     {tournament.settlementStatus === 'completed' && (
                         <Chip
                             icon="check-circle"
@@ -428,7 +439,27 @@ export default function TournamentSettlementScreen() {
                             Settlement Completed
                         </Chip>
                     )}
-                </Card.Content>
+                    {['released', 'partial_release'].includes(tournament.settlementStatus) && (
+                        <Chip
+                            icon={tournament.settlementStatus === 'released' ? "bank-transfer" : "alert-circle-outline"}
+                            mode="flat"
+                            style={[styles.paidChip, { backgroundColor: tournament.settlementStatus === 'released' ? '#e8f5e9' : '#fff9c4' }]}
+                            textStyle={{ color: tournament.settlementStatus === 'released' ? '#2e7d32' : '#f57f17' }}
+                        >
+                            {tournament.settlementStatus === 'released' ? 'Route Settlements Released' : 'Partial Release Successful'}
+                        </Chip>
+                    )}
+                    {playerTransactions.some(tx => tx.settlementHeld) && (
+                        <Chip
+                            icon="clock-outline"
+                            mode="flat"
+                            style={{ backgroundColor: '#fff3e0' }}
+                            textStyle={{ color: '#e65100' }}
+                        >
+                            Funds Held ({playerTransactions.filter(tx => tx.settlementHeld).length} Txns)
+                        </Chip>
+                    )}
+                </View>
             </Card>
 
             {/* Financial Summary */}
@@ -487,35 +518,48 @@ export default function TournamentSettlementScreen() {
             {playerTransactions.length > 0 && (
                 <View style={styles.section}>
                     <Text variant="titleLarge" style={styles.sectionTitle}>
-                        Player Registration History
+                        Transaction History
                     </Text>
-                    {playerTransactions.map((tx) => (
-                        <Card key={tx.id} style={styles.historyCard}>
-                            <Card.Content style={styles.historyContent}>
-                                <View style={styles.historyHeader}>
-                                    <View>
-                                        <Text style={{ fontWeight: 'bold' }}>{tx.playerName || 'Anonymous Player'}</Text>
-                                        <Text style={{ fontSize: 11, color: '#666' }}>
-                                            {formatDate(tx.createdAt || tx.webhookReceivedAt || tx.updatedAt)}
-                                        </Text>
+                    {[...playerTransactions, ...settlementHistory]
+                        .sort((a, b) => {
+                            const dateA = a.createdAt?.toDate ? a.createdAt.toDate() : new Date(a.createdAt || 0);
+                            const dateB = b.createdAt?.toDate ? b.createdAt.toDate() : new Date(b.createdAt || 0);
+                            return dateB - dateA;
+                        })
+                        .map((tx) => (
+                            <Card key={tx.id} style={styles.historyCard}>
+                                <Card.Content style={styles.historyContent}>
+                                    <View style={styles.historyHeader}>
+                                        <View>
+                                            <Text style={{ fontWeight: 'bold' }}>
+                                                {tx.type === 'payout' ? 'Organizer Payout' : (tx.playerName || 'Anonymous Player')}
+                                            </Text>
+                                            <Text style={{ fontSize: 11, color: '#666' }}>
+                                                {formatDate(tx.createdAt || tx.webhookReceivedAt || tx.updatedAt)}
+                                            </Text>
+                                        </View>
+                                        <View style={{ alignItems: 'flex-end' }}>
+                                            <Text style={{
+                                                fontWeight: 'bold',
+                                                color: tx.type === 'payout' ? '#d32f2f' : '#2e7d32'
+                                            }}>
+                                                {tx.type === 'payout' ? '-' : ''}₹{tx.amount ? tx.amount.toLocaleString('en-IN') : '0'}
+                                            </Text>
+                                            <Chip
+                                                compact
+                                                textStyle={{ fontSize: 10, color: tx.status === 'SUCCESS' || tx.status === 'released' ? '#1b5e20' : '#b71c1c' }}
+                                                style={{
+                                                    backgroundColor: (tx.status === 'SUCCESS' || tx.status === 'released' || tx.status === 'PROCESSED') ? '#e8f5e9' : '#ffebee',
+                                                    height: 20
+                                                }}
+                                            >
+                                                {tx.status} {tx.settlementHeld ? '(Held)' : ''}
+                                            </Chip>
+                                        </View>
                                     </View>
-                                    <View style={{ alignItems: 'flex-end' }}>
-                                        <Text style={{ fontWeight: 'bold', color: '#2e7d32' }}>₹{tx.amount}</Text>
-                                        <Chip
-                                            compact
-                                            textStyle={{ fontSize: 10 }}
-                                            style={{
-                                                backgroundColor: tx.status === 'SUCCESS' ? '#e8f5e9' : '#ffebee',
-                                                height: 20
-                                            }}
-                                        >
-                                            {tx.status} {tx.settlementHeld ? '(Held)' : ''}
-                                        </Chip>
-                                    </View>
-                                </View>
-                            </Card.Content>
-                        </Card>
-                    ))}
+                                </Card.Content>
+                            </Card>
+                        ))}
                 </View>
             )}
 
@@ -597,27 +641,36 @@ export default function TournamentSettlementScreen() {
                     </Button>
                 </Surface>
             )}
-
-            {/* Action Button */}
-            <View style={styles.buttonContainer}>
-                {tournament.settlementStatus === 'completed' ? (
+            {/* Action Button Section adapted for robustness */}
+            <View style={[styles.buttonContainer, { paddingBottom: 40 }]}>
+                {(tournament.settlementStatus === 'completed' || (['released', 'partial_release'].includes(tournament.settlementStatus) && !playerTransactions.some(tx => tx.settlementHeld))) ? (
                     <Card style={[styles.completedBox, { marginHorizontal: 16 }]}>
                         <Card.Content>
                             <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 10 }}>
-                                <MaterialCommunityIcons name="check-decagram" size={28} color="#2e7d32" />
+                                <MaterialCommunityIcons
+                                    name={tournament.settlementStatus === 'released' ? "bank-transfer" : "check-decagram"}
+                                    size={28}
+                                    color="#2e7d32"
+                                />
                                 <Text style={[styles.completedText, { marginLeft: 10 }]}>
-                                    Settlement Completed
+                                    {tournament.settlementStatus === 'released' ? 'Route Settlements Released' : 'Settlement Completed'}
                                 </Text>
                             </View>
                             <Divider style={{ marginVertical: 10 }} />
                             <View style={styles.row}>
-                                <Text style={styles.label}>Settled On:</Text>
-                                <Text style={styles.value}>{new Date(tournament.settlementDate).toLocaleDateString('en-IN')}</Text>
+                                <Text style={styles.label}>
+                                    {tournament.settlementStatus === 'released' ? 'Released On:' : 'Settled On:'}
+                                </Text>
+                                <Text style={styles.value}>
+                                    {formatDate(tournament.settlementReleasedAt || tournament.settlementDate)}
+                                </Text>
                             </View>
-                            <View style={styles.row}>
-                                <Text style={styles.label}>Amount Paid:</Text>
-                                <Text style={[styles.value, { color: '#2e7d32', fontWeight: 'bold' }]}>₹{tournament.settlementAmount?.toLocaleString('en-IN')}</Text>
-                            </View>
+                            {(tournament.settlementAmount || tournament.totalReleasedAmount) && (
+                                <View style={styles.row}>
+                                    <Text style={styles.label}>Amount Paid:</Text>
+                                    <Text style={[styles.value, { color: '#2e7d32', fontWeight: 'bold' }]}>₹{(tournament.settlementAmount || tournament.totalReleasedAmount)?.toLocaleString('en-IN')}</Text>
+                                </View>
+                            )}
                         </Card.Content>
                     </Card>
                 ) : (
