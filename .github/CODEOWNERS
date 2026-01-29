@@ -1,0 +1,11 @@
+# These owners will be required for PR reviews
+
+# All files
+*       @ritikyadav10888-oss
+
+# Security critical files - Any change here REQUIRES your approval
+/firestore.rules @ritikyadav10888-oss
+/storage.rules   @ritikyadav10888-oss
+/functions/      @ritikyadav10888-oss
+/.env.example    @ritikyadav10888-oss
+/src/services/RazorpayService.js @ritikyadav10888-oss
