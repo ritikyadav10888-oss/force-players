@@ -407,7 +407,18 @@ exports.createPaymentWithRoute = onCall(
             }
 
             // Calculate split amounts (in paise)
-            const totalAmount = Math.round(amount * 100);
+        // SECURITY: Use entryFee from database, ignore client-provided amount
+        const entryFee = Number(tournament.entryFee);
+        if (!entryFee || isNaN(entryFee)) {
+            throw new HttpsError('failed-precondition', 'Tournament entry fee is invalid or not set');
+        }
+
+        // Verify client amount matches (optional but good for debugging)
+        if (Math.abs(Number(amount) - entryFee) > 1) {
+            console.warn(`⚠️ Client amount (${amount}) differs from DB entry fee (${entryFee})`);
+        }
+
+        const totalAmount = Math.round(entryFee * 100);
             const organizerShare = Math.round(totalAmount * 0.95);
             const platformCommission = totalAmount - organizerShare;
 
