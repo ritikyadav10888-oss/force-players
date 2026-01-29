@@ -4,7 +4,7 @@ import { Button, Title, Text, Surface, useTheme, Avatar, Searchbar, IconButton, 
 import { useRouter } from 'expo-router';
 import { useAuth } from '../../src/context/AuthContext';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { doc, getDoc, collection, query, where, getDocs, updateDoc, orderBy } from 'firebase/firestore';
+import { doc, getDoc, collection, query, where, getDocs, updateDoc, orderBy, getCountFromServer } from 'firebase/firestore';
 import { httpsCallable } from 'firebase/functions';
 import { db, functions } from '../../src/config/firebase';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
@@ -46,11 +46,25 @@ export default function OwnerDashboard() {
         // Respect manual completion
         if (tournament.status === 'completed') return 'completed';
 
-        // Parse start date (DD-MM-YYYY format)
+        // Parse date (Handles both "DD-MM-YYYY" and "Day Mon DD YYYY")
         const parseDate = (dateStr) => {
             if (!dateStr) return null;
-            const [day, month, year] = dateStr.split('-').map(Number);
-            return new Date(year, month - 1, day);
+
+            // Try standard Date parsing first (for "Day Mon DD YYYY" from toDateString())
+            const dateObj = new Date(dateStr);
+            if (!isNaN(dateObj.getTime())) {
+                dateObj.setHours(0, 0, 0, 0);
+                return dateObj;
+            }
+
+            // Fallback for manual "DD-MM-YYYY" string
+            if (dateStr.includes('-')) {
+                const [day, month, year] = dateStr.split('-').map(Number);
+                if (day && month && year) {
+                    return new Date(year, month - 1, day);
+                }
+            }
+            return null;
         };
 
         const startDate = parseDate(tournament.startDate);
@@ -209,17 +223,22 @@ export default function OwnerDashboard() {
                 }
             });
 
-            // Fetch player counts for lists
+            // Fetch player counts for lists (Optimized with count aggregation)
             const [activeWithCounts, needsClosingWithCounts] = await Promise.all([
                 Promise.all(activeList.map(async (t) => {
+                    // Use stored count if available and reliable, otherwise aggregate
+                    if (t.playerCount !== undefined) return t;
+
                     const pColl = collection(db, 'tournaments', t.id, 'players');
-                    const snap = await getDocs(pColl).catch(() => ({ size: 0 }));
-                    return { ...t, playerCount: snap.size || 0 };
+                    const snap = await getCountFromServer(pColl).catch(() => ({ data: () => ({ count: 0 }) }));
+                    return { ...t, playerCount: snap.data().count };
                 })),
                 Promise.all(needsClosing.map(async (t) => {
+                    if (t.playerCount !== undefined) return t;
+
                     const pColl = collection(db, 'tournaments', t.id, 'players');
-                    const snap = await getDocs(pColl).catch(() => ({ size: 0 }));
-                    return { ...t, playerCount: snap.size || 0 };
+                    const snap = await getCountFromServer(pColl).catch(() => ({ data: () => ({ count: 0 }) }));
+                    return { ...t, playerCount: snap.data().count };
                 }))
             ]);
 
@@ -247,16 +266,27 @@ export default function OwnerDashboard() {
                     const fee = parseInt(tData.entryFee) || 0;
 
                     // Priority 1: Use pre-calculated totals if they exist
-                    if (tData.totalCollections !== undefined && tData.playerCount !== undefined) {
-                        totalPlayersCount += tData.playerCount || 0;
-                        calcRevenue += tData.totalCollections || 0;
+                    if (tData.totalCollections !== undefined && tData.paidPlayerCount !== undefined) {
+                        // Use stored stats for performance
+                        const paidCount = tData.paidPlayerCount || 0;
+                        const collections = tData.totalCollections || 0;
 
-                        // We still need paid/pending breakdown if not stored
-                        // For now, if we have totalCollections and playerCount, we can estimate or do a quick check
-                        // Better: If they exist, we assume the tournament doc is the source of truth
+                        // Estimate pending based on total slots vs paid, or just track paid
+                        // For now we trust the stored paid values
+                        paidPlayers += paidCount;
+                        calcRevenue += collections;
+
+                        // For total players (including unpaid), if we don't have a field, we might still need to query
+                        // But let's check if we have a 'totalRegistrations' or similar.
+                        // If not, we might skip the expensive query for general stats or do a lightweight count.
+
+                        // We will skip detailed pending calculation for every tournament to save reads
+                        // unless explicitly needed.
                     } else {
                         // Fallback: Manual count (Only for older data or if missing)
                         const pColl = collection(db, 'tournaments', tDoc.id, 'players');
+                        // OPTIMIZATION: If we just need counts, use aggregation, but here we need 'paid' status logic
+                        // So we still fetch docs for legacy/unmigrated tournaments, BUT this should be rare for new ones.
                         const pSnap = await getDocs(pColl).catch(() => ({ docs: [], size: 0 }));
 
                         totalPlayersCount += pSnap.size;

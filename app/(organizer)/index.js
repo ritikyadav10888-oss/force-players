@@ -43,7 +43,15 @@ export default function OrganizerDashboard() {
 
         const parseDate = (dateStr) => {
             if (!dateStr) return null;
-            // Try standard DD-MM-YYYY format first
+
+            // Try standard Date parsing first (for "Day Mon DD YYYY" from toDateString())
+            const dateObj = new Date(dateStr);
+            if (!isNaN(dateObj.getTime())) {
+                dateObj.setHours(0, 0, 0, 0);
+                return dateObj;
+            }
+
+            // Fallback for manual "DD-MM-YYYY" string
             if (dateStr.includes('-')) {
                 const parts = dateStr.split('-');
                 if (parts.length === 3) {
@@ -53,9 +61,7 @@ export default function OrganizerDashboard() {
                     }
                 }
             }
-            // Fallback for standard date strings (e.g. "Tue Jan 20 2026")
-            const d = new Date(dateStr);
-            return isNaN(d.getTime()) ? null : d;
+            return null;
         };
 
         const startDate = parseDate(tournament.startDate);
