@@ -1226,16 +1226,21 @@ const styles = StyleSheet.create({
     },
     bannerContainer: {
         width: '100%',
-        height: 500, // Increased height for full poster visibility
+        aspectRatio: 16 / 9, // Standard banner aspect ratio
         backgroundColor: '#f0f0f0',
-        borderRadius: 15,
+        borderRadius: 12,
         marginBottom: 20,
         overflow: 'hidden',
         justifyContent: 'center',
         alignItems: 'center',
         borderWidth: 1,
-        borderColor: '#ccc',
-        borderStyle: 'dashed'
+        borderColor: '#e0e0e0',
+        borderStyle: 'dashed',
+        elevation: 2,
+        shadowColor: '#000',
+        shadowOffset: { width: 0, height: 2 },
+        shadowOpacity: 0.1,
+        shadowRadius: 4,
     },
     bannerPlaceholder: {
         alignItems: 'center',
@@ -1244,7 +1249,7 @@ const styles = StyleSheet.create({
     bannerImage: {
         width: '100%',
         height: '100%',
-        resizeMode: 'contain'
+        resizeMode: 'cover'
     },
     label: {
         marginBottom: 8,

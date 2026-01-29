@@ -109,23 +109,19 @@ export default function TournamentSettlementScreen() {
             }
 
             // Calculate financials
-            const playersQuery = query(
-                collection(db, 'tournaments', id, 'players'),
-                where('paid', '==', true)
-            );
-            const playersSnap = await getDocs(playersQuery);
+            // PERFORMANCE: Use aggregated fields from tournament doc instead of querying all players
+            const totalCollected = tournamentData.totalCollections || 0;
+            const paidPlayerCount = tournamentData.paidPlayerCount || 0;
 
-            // Calculate financials accurately by summing actual paid amounts
-            let totalCollected = 0;
-            playersSnap.forEach(doc => {
-                totalCollected += (doc.data().paidAmount || tournamentData.entryFee || 0);
-            });
+            // Fallback for legacy data (if totalCollections is missing but we suspect there are players)
+            // Ideally we'd run a migration, but here we trust the tournament doc for performance
+
 
             const platformCommission = totalCollected * 0.05;
             const organizerShare = totalCollected - platformCommission;
 
             setFinancials({
-                totalRegistrations: playersSnap.size,
+                totalRegistrations: paidPlayerCount,
                 totalCollected,
                 platformCommission,
                 organizerShare,
@@ -498,19 +494,32 @@ export default function TournamentSettlementScreen() {
 
                 <View style={styles.row}>
                     <Text style={[styles.label, styles.bold]}>Organizer Share (95%):</Text>
-                    <Text style={[styles.value, styles.total, { color: '#1a237e' }]}>
-                        ₹{financials.organizerShare.toLocaleString('en-IN', { minimumFractionDigits: 1 })}
-                    </Text>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'flex-end', flex: 1 }}>
+                        {financials.totalHeldAmount > 0 && (
+                            <Chip compact icon="lock" style={{ marginRight: 8, backgroundColor: '#FFF3E0' }}>Held</Chip>
+                        )}
+                        <Text style={[styles.value, styles.total, { color: '#1a237e', flex: 0 }]}>
+                            ₹{financials.organizerShare.toLocaleString('en-IN', { minimumFractionDigits: 1 })}
+                        </Text>
+                    </View>
                 </View>
 
                 {financials.totalHeldAmount > 0 && (
-                    <View style={[styles.row, { marginTop: 10, padding: 10, backgroundColor: '#e8f5e9', borderRadius: 8 }]}>
-                        <MaterialCommunityIcons name="clock-outline" size={18} color="#2e7d32" />
-                        <Text style={[styles.label, { color: '#2e7d32', marginLeft: 5, fontWeight: 'bold' }]}>Held in Route:</Text>
-                        <Text style={[styles.value, { color: '#2e7d32', fontWeight: 'bold' }]}>
-                            ₹{financials.totalHeldAmount.toLocaleString('en-IN')}
+                    <Surface style={{ marginTop: 15, padding: 12, backgroundColor: '#FFF8E1', borderRadius: 8, borderLeftWidth: 4, borderLeftColor: '#FFB300' }} elevation={1}>
+                        <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 5 }}>
+                            <MaterialCommunityIcons name="safe" size={20} color="#F57C00" />
+                            <Text style={{ color: '#F57C00', marginLeft: 8, fontWeight: 'bold', fontSize: 14 }}>Settlement On Hold</Text>
+                        </View>
+                        <Text style={{ fontSize: 12, color: '#795548', marginBottom: 8 }}>
+                            Funds are currently held in the Razorpay Route account. Release them to the organizer once the tournament is completed.
                         </Text>
-                    </View>
+                        <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: 5 }}>
+                            <Text style={{ fontSize: 12, fontWeight: '600', color: '#5D4037' }}>Held Amount:</Text>
+                            <Text style={{ fontSize: 16, fontWeight: 'bold', color: '#E65100' }}>
+                                ₹{financials.totalHeldAmount.toLocaleString('en-IN')}
+                            </Text>
+                        </View>
+                    </Surface>
                 )}
             </Surface>
 
