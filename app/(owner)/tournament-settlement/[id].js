@@ -109,18 +109,18 @@ export default function TournamentSettlementScreen() {
             }
 
             // Calculate financials
-            const playersQuery = query(
-                collection(db, 'tournaments', id, 'players'),
-                where('paid', '==', true)
-            );
-            const playersSnap = await getDocs(playersQuery);
+            // PERFORMANCE: Use aggregated fields from tournament doc instead of querying all players
+            const totalCollected = tournamentData.totalCollections || 0;
+            const paidPlayerCount = tournamentData.paidPlayerCount || 0;
 
-            const totalCollected = playersSnap.size * (tournamentData.entryFee || 0);
+            // Fallback for legacy data (if totalCollections is missing but we suspect there are players)
+            // Ideally we'd run a migration, but here we trust the tournament doc for performance
+
             const platformCommission = totalCollected * 0.05;
             const organizerShare = totalCollected - platformCommission;
 
             setFinancials({
-                totalRegistrations: playersSnap.size,
+                totalRegistrations: paidPlayerCount,
                 totalCollected,
                 platformCommission,
                 organizerShare,

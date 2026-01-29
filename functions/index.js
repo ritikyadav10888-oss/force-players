@@ -409,8 +409,13 @@ exports.createPaymentWithRoute = onCall(
             // Calculate split amounts (in paise)
         // SECURITY: Use entryFee from database, ignore client-provided amount
         const entryFee = Number(tournament.entryFee);
-        if (!entryFee || isNaN(entryFee)) {
-            throw new HttpsError('failed-precondition', 'Tournament entry fee is invalid or not set');
+
+        if (isNaN(entryFee)) {
+            throw new HttpsError('failed-precondition', 'Tournament entry fee is not set');
+        }
+
+        if (entryFee === 0) {
+            throw new HttpsError('failed-precondition', 'Cannot create payment order for a free tournament');
         }
 
         // Verify client amount matches (optional but good for debugging)
