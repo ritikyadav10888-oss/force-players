@@ -11,7 +11,6 @@ export const RefundService = {
         try {
             const refundFn = httpsCallable(functions, 'processPlayerRefund');
             const result = await refundFn(data);
-            console.log("✅ Refund processed:", result.data);
             return result.data;
         } catch (error) {
             console.error("❌ Refund failed:", error);

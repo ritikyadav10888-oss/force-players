@@ -17,16 +17,11 @@ const getRazorpayInstance = (secrets) => {
     const keyId = (secrets.RAZORPAY_KEY_ID || "").trim();
     const keySecret = (secrets.RAZORPAY_KEY_SECRET || "").trim();
 
-    // Debug logging (Masked)
-    if (keyId) {
-        console.log(`🔑 RZP Auth Check: ID=${keyId.substring(0, 8)}...${keyId.slice(-3)} (Len: ${keyId.length})`);
-    } else {
+    if (!keyId) {
         console.error("❌ RAZORPAY_KEY_ID is missing in process.env / secrets");
     }
 
-    if (keySecret) {
-        console.log(`🔐 RZP Auth Check: Secret=${keySecret.substring(0, 4)}...${keySecret.slice(-3)} (Len: ${keySecret.length})`);
-    } else {
+    if (!keySecret) {
         console.error("❌ RAZORPAY_KEY_SECRET is missing in process.env / secrets");
     }
 
@@ -43,8 +38,6 @@ const createLinkedAccount = async (organizerData, secrets) => {
     const cleanId = secrets.RAZORPAY_KEY_ID?.trim();
     const cleanSecret = secrets.RAZORPAY_KEY_SECRET?.trim();
     const auth = Buffer.from(`${cleanId}:${cleanSecret}`).toString('base64');
-
-    console.log('🔗 Creating linked account for organizer');
 
     // Step 1: Create linked account
     const accountResponse = await fetch('https://api.razorpay.com/v1/accounts', {
@@ -71,7 +64,6 @@ const createLinkedAccount = async (organizerData, secrets) => {
     }
 
     const account = await accountResponse.json();
-    console.log(`✅ Linked account created: ${account.id}`);
 
     // Step 2: Add bank account details
     const stakeholderResponse = await fetch(`https://api.razorpay.com/v1/accounts/${account.id}/stakeholders`, {
@@ -95,7 +87,6 @@ const createLinkedAccount = async (organizerData, secrets) => {
         throw new Error(error.error?.description || 'Failed to add bank account');
     }
 
-    console.log(`✅ Bank account added to linked account`);
     return account;
 };
 
@@ -121,7 +112,7 @@ exports.razorpayWebhook = onRequest(
                 isValid = Razorpay.validateWebhookSignature(body.toString(), signature, RAZORPAY_WEBHOOK_SECRET);
             }
         } catch (err) {
-            console.error('❌ Verification error:', err.message);
+            console.error('❌ Verification error');
         }
 
         if (!isValid) {
@@ -131,8 +122,6 @@ exports.razorpayWebhook = onRequest(
 
         const event = req.body.event;
         const payload = req.body.payload;
-
-        console.log(`🔔 Event: ${event}`);
 
         // Handle Payment Events
         if (event.startsWith('payment.') || event.startsWith('order.') || event.startsWith('invoice.')) {
@@ -159,11 +148,9 @@ exports.razorpayWebhook = onRequest(
                                             RAZORPAY_KEY_ID: process.env.RAZORPAY_KEY_ID,
                                             RAZORPAY_KEY_SECRET: process.env.RAZORPAY_KEY_SECRET
                                         });
-                                        console.log(`🎯 Auto-capturing payment: ${entity.id}`);
                                         await rzp.payments.capture(entity.id, entity.amount, entity.currency || 'INR');
-                                        console.log(`✅ Payment ${entity.id} captured successfully`);
                                     } catch (captureErr) {
-                                        console.error(`❌ Capture Failed for ${entity.id}:`, captureErr.message);
+                                        console.error(`❌ Capture Failed`);
                                         if (!captureErr.message?.includes('already been captured')) {
                                             throw new Error("Capture failed, rolling back transaction");
                                         }
@@ -233,8 +220,6 @@ exports.razorpayWebhook = onRequest(
             const transfer = payload.transfer.entity;
             const { tournamentId, playerId } = transfer.notes || {};
 
-            console.log(`🔄 Transfer Event: ${event} - ${transfer.id}`);
-
             if (event === 'transfer.processed') {
                 // Transfer successfully settled to organizer
                 if (tournamentId) {
@@ -250,8 +235,6 @@ exports.razorpayWebhook = onRequest(
                             settlementCompletedAt: admin.firestore.FieldValue.serverTimestamp(),
                             updatedAt: admin.firestore.FieldValue.serverTimestamp()
                         });
-
-                        console.log(`✅ Transaction updated: ${transactionsSnap.docs[0].id}`);
                     }
 
                     // Check if all transfers for tournament are processed
@@ -269,7 +252,6 @@ exports.razorpayWebhook = onRequest(
                             settlementStatus: 'completed',
                             settlementCompletedAt: admin.firestore.FieldValue.serverTimestamp()
                         });
-                        console.log(`✅ Tournament settlement completed: ${tournamentId}`);
                     }
                 }
             } else if (event === 'transfer.failed') {
@@ -293,7 +275,7 @@ exports.razorpayWebhook = onRequest(
                         lastTransferError: transfer.failure_reason || 'Transfer failed'
                     });
 
-                    console.error(`❌ Transfer failed: ${transfer.id}`);
+                    console.error(`❌ Transfer failed`);
                 }
             }
         }
@@ -379,23 +361,18 @@ exports.createPaymentWithRoute = onCall(
     },
     async (request) => {
         const { tournamentId, playerId, amount, playerName, transactionId } = request.data;
-        console.log(`📦 createPaymentWithRoute: playerId=${playerId} (Type=${typeof playerId}), tourneyId=${tournamentId}, amt=${amount}`);
 
         if (!playerId || playerId === 'null' || playerId === 'undefined' || playerId === 'null' || playerId === 'undefined' || (typeof playerId === 'object' && !playerId)) {
-            console.error("❌ CRITICAL: playerId is missing or invalid on server:", {
-                value: playerId,
-                type: typeof playerId,
-                raw: request.data
-            });
+            console.error("❌ CRITICAL: playerId is missing or invalid on server");
             throw new HttpsError('invalid-argument', 'Missing playerId');
         }
 
         if (!tournamentId || tournamentId === 'null' || tournamentId === 'undefined') {
-            console.error("❌ Missing tournamentId:", tournamentId);
+            console.error("❌ Missing tournamentId");
             throw new HttpsError('invalid-argument', 'Missing tournamentId');
         }
         if (!amount || isNaN(parseFloat(amount))) {
-            console.error("❌ Missing or invalid amount:", amount);
+            console.error("❌ Missing or invalid amount");
             throw new HttpsError('invalid-argument', 'Missing or invalid amount');
         }
 
@@ -437,14 +414,12 @@ exports.createPaymentWithRoute = onCall(
 
             // Verify client amount matches (optional but good for debugging)
             if (Math.abs(Number(amount) - entryFee) > 1) {
-                console.warn(`⚠️ Client amount (${amount}) differs from DB entry fee (${entryFee})`);
+                console.warn(`⚠️ Client amount differs from DB entry fee`);
             }
 
             const totalAmount = Math.round(entryFee * 100);
             const organizerShare = Math.round(totalAmount * 0.95);
             const platformCommission = totalAmount - organizerShare;
-
-            console.log(`💰 Creating order: ₹${totalAmount / 100} (Org: ₹${organizerShare / 100}, Platform: ₹${platformCommission / 100})`);
 
             // Create Razorpay instance
             const rzp = getRazorpayInstance({
@@ -488,28 +463,9 @@ exports.createPaymentWithRoute = onCall(
                         on_hold_until: Math.floor(Date.now() / 1000) + (30 * 24 * 60 * 60)
                     }
                 ];
-                console.log(`🔗 Route transfers added for account: ${linkedAccountId}`);
-            } else {
-                console.log(`ℹ️ Standard payment - No transfers added.`);
             }
 
             const order = await rzp.orders.create(orderOptions);
-            console.log(`✅ Order Created: ${order.id}. Transfers:`, order.transfers ? order.transfers.length : 0);
-
-            if (order.transfers) {
-                console.log(`📡 First Transfer Sample: Account=${order.transfers[0]?.account}, OnHold=${order.transfers[0]?.on_hold}`);
-            }
-            console.log(`✅ Order created: ${order.id}${linkedAccountId ? ' (Route)' : ' (Standard)'}`);
-            if (linkedAccountId) {
-                console.log(`💰 Route Split: ₹${organizerShare / 100} (held) + ₹${platformCommission / 100} (instant)`);
-            }
-
-            // Store transfer ID in transaction (will be updated by webhook)
-            // We'll get the transfer ID from the order
-            if (order.transfers && order.transfers.length > 0) {
-                const transferId = order.transfers[0].id;
-                console.log(`🔗 Transfer ID: ${transferId}`);
-            }
 
             return {
                 success: true,
@@ -571,8 +527,6 @@ exports.releaseSettlement = onCall(
                 .where('settlementHeld', '==', true)
                 .get();
 
-            console.log(`🔍 Found ${transactionsSnap.size} held transactions for tournament ${tournamentId}`);
-
             if (transactionsSnap.empty) {
                 throw new HttpsError('not-found', 'No held settlements found');
             }
@@ -598,20 +552,17 @@ exports.releaseSettlement = onCall(
                     // Get order details to find transfer ID
                     if (txn.razorpayOrderId) {
                         const order = await rzp.orders.fetch(txn.razorpayOrderId);
-                        console.log(`📦 Order Fetched: ${order.id}. Transfers in order object: ${order.transfers?.length || 0}`);
 
                         let transfersToProcess = order.transfers || [];
 
                         // Fallback: Fetch transfers explicitly if not in order object
                         if (transfersToProcess.length === 0) {
-                            console.log(`📡 Fetching transfers via rzp.transfers.all for ${txn.razorpayOrderId}`);
                             const tResult = await rzp.transfers.all({ order_id: txn.razorpayOrderId });
                             transfersToProcess = tResult.items || [];
                         }
 
                         if (transfersToProcess.length > 0) {
                             const transferId = transfersToProcess[0].id;
-                            console.log(`🔓 Attempting release for transferId: ${transferId}`);
 
                             // Release the transfer
                             const response = await fetch(`https://api.razorpay.com/v1/transfers/${transferId}`, {
@@ -641,8 +592,6 @@ exports.releaseSettlement = onCall(
                                     releasedBy: request.auth.uid,
                                     updatedAt: admin.firestore.FieldValue.serverTimestamp()
                                 });
-
-                                console.log(`✅ Released transfer: ${transfer.id}`);
                             } else {
                                 const error = await response.json().catch(() => ({}));
                                 console.error(`❌ Failed to release transfer ${transferId}:`, error);
@@ -669,7 +618,6 @@ exports.releaseSettlement = onCall(
                 updatedAt: admin.firestore.FieldValue.serverTimestamp()
             });
 
-            console.log(`✅ Released ${releasedTransfers.length} settlements for tournament ${tournamentId}`);
             if (failedTransfers.length > 0) {
                 console.error(`❌ Failed to release ${failedTransfers.length} transfers`);
             }
@@ -699,8 +647,6 @@ exports.createPlayerPaymentTransaction = onCall(
     },
     async (request) => {
         const { tournamentId, amount, playerId, playerName } = request.data;
-
-        console.log(`📝 createPlayerPaymentTransaction: playerId=${playerId}, tourney=${tournamentId}`);
 
         if (!playerId || playerId === 'null' || playerId === 'undefined') {
             console.error("❌ Missing playerId in createPlayerPaymentTransaction");
@@ -871,7 +817,6 @@ exports.linkRouteAccount = onCall(
                 updatedAt: admin.firestore.FieldValue.serverTimestamp()
             });
 
-            console.log(`✅ Linked account ${linkedAccountId} to organizer ${organizerId}`);
             return {
                 success: true,
                 message: 'Account linked successfully',
@@ -904,7 +849,6 @@ exports.verifyPayment = onCall(
             playerId,
             transactionId
         } = request.data;
-        console.log(`🕵️ verifyPayment incoming: tid=${tournamentId}, pid=${playerId}, payid=${razorpay_payment_id}, ordid=${razorpay_order_id}`);
 
         let playerDoc = null;
 
@@ -935,8 +879,6 @@ exports.verifyPayment = onCall(
             throw new HttpsError('internal', 'Payment verification not configured');
         }
 
-        console.log(`🔐 Verifying payment: ${razorpay_payment_id}`);
-
         try {
             let isSignatureValid = false;
 
@@ -949,7 +891,6 @@ exports.verifyPayment = onCall(
                     .digest('hex');
 
                 isSignatureValid = expectedSignature === razorpay_signature;
-                console.log(`📝 Signature: Expected=${expectedSignature.substring(0, 10)}..., Got=${razorpay_signature.substring(0, 10)}... Result=${isSignatureValid}`);
 
                 if (!isSignatureValid) {
                     // Log the failed verification attempt
@@ -974,7 +915,6 @@ exports.verifyPayment = onCall(
             });
 
             const payment = await rzp.payments.fetch(razorpay_payment_id);
-            console.log(`💳 Payment Status from Razorpay: ${payment.status}`);
 
             // Verify payment status is captured
             if (payment.status !== 'captured' && payment.status !== 'authorized') {
@@ -994,10 +934,9 @@ exports.verifyPayment = onCall(
                     const playerData = playerDoc.data();
                     const expectedAmount = playerData.paidAmount || 0;
                     const paidAmount = payment.amount / 100;
-                    console.log(`💰 Amount Comparison: Expected=${expectedAmount}, Paid=${paidAmount}`);
 
                     if (expectedAmount > 0 && Math.abs(paidAmount - expectedAmount) > 0.01) {
-                        console.error(`❌ Amount mismatch: expected ₹${expectedAmount}, got ₹${paidAmount}`);
+                        console.error(`❌ Amount mismatch`);
                         await db.collection('payment_verification_logs').add({
                             razorpay_payment_id,
                             status: 'AMOUNT_MISMATCH',
@@ -1015,10 +954,8 @@ exports.verifyPayment = onCall(
 
             // Step 3: Auto-capture if only authorized
             if (payment.status === 'authorized') {
-                console.log(`🎯 Auto-capturing authorized payment: ${razorpay_payment_id}`);
                 try {
                     await rzp.payments.capture(razorpay_payment_id, payment.amount, payment.currency);
-                    console.log(`✅ Payment captured successfully`);
                 } catch (captureErr) {
                     if (!captureErr.message?.includes('already been captured')) {
                         console.error(`❌ Capture failed:`, captureErr.message);
@@ -1041,19 +978,15 @@ exports.verifyPayment = onCall(
                     const order = await rzp.orders.fetch(razorpay_order_id);
                     if (order.transfers && order.transfers.length > 0) {
                         transferId = order.transfers[0].id;
-                        console.log(`🔗 Extracted transferId: ${transferId} from order object`);
                     } else {
                         // Fallback: Fetch transfers explicitly for this order
-                        console.log(`📡 Order transfers missing, fetching from rzp.transfers.all for ${razorpay_order_id}`);
                         const transfersResponse = await rzp.transfers.all({ order_id: razorpay_order_id });
                         if (transfersResponse.items && transfersResponse.items.length > 0) {
                             transferId = transfersResponse.items[0].id;
-                            console.log(`🔗 Found transferId via fallback: ${transferId}`);
                         } else {
-                            console.warn(`⚠️ No transfers found for order: ${razorpay_order_id} even in fallback`);
+                            console.warn(`⚠️ No transfers found`);
                         }
                     }
-                    console.log(`🔗 Final transferId status: ${transferId ? 'Found' : 'Not Found'}. Value: ${transferId}`);
                 } catch (err) {
                     console.warn('⚠️ Could not fetch order transfers:', err.message);
                 }
@@ -1069,7 +1002,6 @@ exports.verifyPayment = onCall(
 
                 // Ensure playerDoc is available (fallback if skipped in security step)
                 if (!playerDoc) {
-                    console.log(`📡 Fetching playerDoc in Step 6 fallback for ${finalPlayerId}`);
                     playerDoc = await playerRef.get();
                 }
 
@@ -1148,8 +1080,6 @@ exports.verifyPayment = onCall(
                 method: payment.method,
                 timestamp: admin.firestore.FieldValue.serverTimestamp()
             });
-
-            console.log(`✅ Payment verified and recorded: ${razorpay_payment_id}`);
 
             return {
                 success: true,
@@ -1252,8 +1182,6 @@ exports.processPlayerRefund = onCall(
             const refundAmount = Math.floor(paidAmount * (refundPercentage / 100) * 100); // Convert to paise
             const processingFee = Math.floor(paidAmount * ((100 - refundPercentage) / 100) * 100);
 
-            console.log(`💰 Processing refund: ₹${paidAmount} → ₹${refundAmount / 100} (${refundPercentage}%)`);
-
             // Initialize Razorpay
             const rzp = getRazorpayInstance({
                 RAZORPAY_KEY_ID: process.env.RAZORPAY_KEY_ID,
@@ -1272,8 +1200,6 @@ exports.processPlayerRefund = onCall(
                     processingFee: processingFee / 100
                 }
             });
-
-            console.log(`✅ Refund created: ${refund.id}`);
 
             // Update player document
             await playerRef.update({
