@@ -11,6 +11,7 @@ import { httpsCallable } from 'firebase/functions';
 import * as ImagePicker from 'expo-image-picker';
 import { db, auth, storage, functions } from '../../src/config/firebase';
 import { useAuth } from '../../src/context/AuthContext';
+import Toast from 'react-native-toast-message';
 
 import DateTimePicker from '@react-native-community/datetimepicker';
 
@@ -216,7 +217,12 @@ export default function CreateOrganizerScreen() {
                     bankDetails,
                     accessExpiryDate: accessExpiryIso,
                 });
-                Alert.alert('Success', 'Organizer updated successfully!');
+                Toast.show({
+                    type: 'success',
+                    text1: '✅ Organizer Updated!',
+                    text2: 'Profile details saved successfully',
+                    visibilityTime: 3000,
+                });
             } else {
                 const createOrganizer = httpsCallable(functions, 'createOrganizer');
                 const payload = {
@@ -231,7 +237,12 @@ export default function CreateOrganizerScreen() {
 
                 // console.log("Submitting payload:", JSON.stringify(payload));
                 await createOrganizer(payload);
-                Alert.alert('Success', 'Organizer account created successfully!');
+                Toast.show({
+                    type: 'success',
+                    text1: '✅ Organizer Created!',
+                    text2: 'Account and login credentials set up successfully',
+                    visibilityTime: 4000,
+                });
             }
             router.back();
 

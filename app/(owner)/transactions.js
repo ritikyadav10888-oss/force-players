@@ -65,9 +65,14 @@ export default function TransactionsScreen() {
     };
 
     const filteredTransactions = transactions.filter(txn => {
-        // Filter by type (only if not grouped)
+        // Filter by type
         if (filter === 'payments' && txn.type !== 'collection') return false;
-        if (filter === 'payouts' && txn.type !== 'payout') return false;
+        if (filter === 'payouts') {
+            // Include both direct payouts and released Route settlements
+            const isDirectPayout = txn.type === 'payout';
+            const isReleasedRoute = txn.type === 'collection' && (txn.settlementHeld === false || txn.transferId);
+            if (!isDirectPayout && !isReleasedRoute) return false;
+        }
 
         // Filter by status
         if (statusFilter !== 'all') {
@@ -99,45 +104,51 @@ export default function TransactionsScreen() {
         if (!acc[tId]) {
             acc[tId] = {
                 id: tId,
-                name: txn.tournamentName || (tId !== 'miscellaneous' ? `ID: ${tId.slice(0, 8)}` : 'Miscellaneous/Internal'),
+                name: txn.tournamentName || (tId !== 'miscellaneous' ? `Tournament: ${tId.slice(0, 8)}` : 'Internal/Admin'),
+                organizer: txn.organizerName || txn.receiver?.name || '',
                 txns: []
             };
         }
-        // If the current transaction has a name but the group fallback is still active, update the group name
-        if (txn.tournamentName && (acc[tId].name === 'Miscellaneous/Internal' || acc[tId].name.startsWith('ID:'))) {
+        // Update group name/organizer if we find better data in any transaction of the group
+        if (txn.tournamentName && (acc[tId].name === 'Internal/Admin' || acc[tId].name.startsWith('Tournament:'))) {
             acc[tId].name = txn.tournamentName;
+        }
+        if (!acc[tId].organizer && (txn.organizerName || txn.receiver?.name)) {
+            acc[tId].organizer = txn.organizerName || txn.receiver?.name;
         }
         acc[tId].txns.push(txn);
         return acc;
     }, {});
 
     const groupedArray = Object.values(groupedTransactions)
-        .filter(group => group.name !== 'Miscellaneous/Internal' && !group.name.startsWith('ID:'))
         .sort((a, b) => {
-            // Helper to get time safely
             const getTime = (txn) => {
                 const date = txn.createdAt?.toDate ? txn.createdAt.toDate() : new Date(txn.createdAt || 0);
                 return date.getTime() || 0;
             };
-
-            // Sort groups by the latest transaction in each group
             const latestA = Math.max(...a.txns.map(getTime));
             const latestB = Math.max(...b.txns.map(getTime));
             return latestB - latestA;
         });
 
-    // Calculate statistics
+    // Calculate statistics (Strictly Successful Only)
     const stats = {
-        totalPayments: transactions.filter(t => t.type === 'collection').length,
-        totalPayouts: transactions.filter(t => t.type === 'payout').length,
+        totalPayments: transactions.filter(t => t.type === 'collection' && t.status === 'SUCCESS').length,
+        totalPayouts: transactions.filter(t => (t.type === 'payout' || (t.type === 'collection' && (t.settlementHeld === false || t.transferId))) && t.status === 'SUCCESS').length,
         successfulPayments: transactions.filter(t => t.type === 'collection' && t.status === 'SUCCESS').length,
-        successfulPayouts: transactions.filter(t => t.type === 'payout' && t.status === 'SUCCESS').length,
+        successfulPayouts: transactions.filter(t => (t.type === 'payout' || (t.type === 'collection' && (t.settlementHeld === false || t.transferId))) && t.status === 'SUCCESS').length,
         totalPaymentsAmount: transactions
             .filter(t => t.type === 'collection' && t.status === 'SUCCESS')
             .reduce((sum, t) => sum + (t.amount || 0), 0),
         totalPayoutsAmount: transactions
-            .filter(t => t.type === 'payout' && t.status === 'SUCCESS')
-            .reduce((sum, t) => sum + (t.amount || 0), 0)
+            .reduce((sum, t) => {
+                if (t.status !== 'SUCCESS') return sum;
+                if (t.type === 'payout') return sum + (t.amount || 0);
+                if (t.type === 'collection' && (t.settlementHeld === false || t.transferId)) {
+                    return sum + ((t.amount || 0) * 0.95);
+                }
+                return sum;
+            }, 0)
     };
 
     const getStatusColor = (status) => {
@@ -145,14 +156,19 @@ export default function TransactionsScreen() {
             case 'SUCCESS': return '#4CAF50';
             case 'FAILED': return '#f44336';
             case 'REVERSED': return '#FF9800';
-            case 'PROCESSING': return '#2196F3';
+            case 'PROCESSING':
+            case 'PROCESSED': return '#2196F3';
             case 'STARTED': return '#9C27B0';
             default: return '#757575';
         }
     };
 
-    const getSourceLabel = (type) => {
-        return type === 'collection' ? 'Player Payment' : 'Organizer Payout';
+    const getSourceLabel = (type, txn = {}) => {
+        if (type === 'collection') {
+            if (txn.settlementHeld === false || txn.transferId) return 'Player Payment (Released)';
+            return 'Player Payment';
+        }
+        return 'Organizer Payout';
     };
 
     if (loading) {
@@ -190,7 +206,7 @@ export default function TransactionsScreen() {
 
                 <Card style={styles.statCard}>
                     <Card.Content>
-                        <Text style={styles.statLabel}>Total Payouts</Text>
+                        <Text style={styles.statLabel}>Successful Payouts</Text>
                         <Text style={styles.statValue}>{stats.totalPayouts}</Text>
                         <Text style={styles.statSubtext}>
                             ₹{stats.totalPayoutsAmount.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
@@ -255,24 +271,14 @@ export default function TransactionsScreen() {
                 groupedArray.map((group) => {
                     const isExpanded = expandedTournaments[group.id];
                     const groupStats = group.txns.reduce((acc, t) => {
-                        // Total Collected: Sum of all successful collection transactions
                         if (t.type === 'collection' && t.status === 'SUCCESS') {
                             acc.collected += (t.amount || 0);
                         }
-
-                        // Total Settled (Paid to Organizer):
-                        // 1. Direct 'payout' transactions (Manual Payouts)
                         if (t.type === 'payout' && t.status === 'SUCCESS') {
                             acc.paid += (t.amount || 0);
-                        }
-                        // 2. Released Route Settlements (embedded in collections)
-                        // If a collection transaction is marked as 'settlementHeld: false' or has a 'transferId', it means it has been released to the organizer account.
-                        // We count 95% of this amount as "Settled" (since 5% is platform fee).
-                        else if (t.type === 'collection' && t.status === 'SUCCESS' && (t.settlementHeld === false || t.transferId)) {
-                            // Route settlements are typically 95% of the collected amount
+                        } else if (t.type === 'collection' && t.status === 'SUCCESS' && (t.settlementHeld === false || t.transferId)) {
                             acc.paid += ((t.amount || 0) * 0.95);
                         }
-
                         return acc;
                     }, { collected: 0, paid: 0 });
 
@@ -284,11 +290,16 @@ export default function TransactionsScreen() {
                                         <Text style={styles.groupHeaderText}>{group.name}</Text>
                                         <View style={styles.groupPreview}>
                                             <Text style={styles.previewText}>
-                                                Collected: <Text style={{ color: '#2e7d32', fontWeight: 'bold' }}>₹{groupStats.collected.toLocaleString('en-IN')}</Text>
+                                                Collected: <Text style={{ color: '#2e7d32', fontWeight: 'bold' }}>₹{Math.floor(groupStats.collected).toLocaleString('en-IN')}</Text>
                                             </Text>
                                             <Text style={styles.previewText}>
-                                                • Settled: <Text style={{ color: '#1a237e', fontWeight: 'bold' }}>₹{groupStats.paid.toLocaleString('en-IN')}</Text>
+                                                • Settled: <Text style={{ color: '#1a237e', fontWeight: 'bold' }}>₹{Math.floor(groupStats.paid).toLocaleString('en-IN')}</Text>
                                             </Text>
+                                            {group.organizer && (
+                                                <Text style={[styles.previewText, { color: '#6200ee', fontWeight: '600' }]}>
+                                                    • {group.organizer}
+                                                </Text>
+                                            )}
                                         </View>
                                     </View>
                                     <IconButton
@@ -302,12 +313,11 @@ export default function TransactionsScreen() {
                                     <View style={styles.expandedContent}>
                                         <Divider style={{ marginBottom: 15 }} />
                                         {group.txns.sort((a, b) => {
-                                            if (a.type !== b.type) return a.type === 'collection' ? -1 : 1;
                                             const dateA = a.createdAt?.toDate ? a.createdAt.toDate() : new Date(a.createdAt || 0);
                                             const dateB = b.createdAt?.toDate ? b.createdAt.toDate() : new Date(b.createdAt || 0);
-                                            return dateB - dateA; // Show newest first within group too
+                                            return dateB - dateA;
                                         }).map((txn) => (
-                                            <TransactionCard key={txn.id} txn={txn} groupName={group.name} />
+                                            <TransactionCard key={txn.id} txn={txn} organizerFallback={group.organizer} />
                                         ))}
                                     </View>
                                 )}
@@ -324,11 +334,10 @@ export default function TransactionsScreen() {
     );
 }
 
-const TransactionCard = ({ txn, groupName }) => {
+const TransactionCard = ({ txn, organizerFallback }) => {
     const formatDate = (dateValue) => {
         if (!dateValue) return 'N/A';
         try {
-            // Handle Firestore Timestamp or ISO String
             const date = dateValue.toDate ? dateValue.toDate() : new Date(dateValue);
             if (isNaN(date.getTime())) return 'Invalid Date';
             return date.toLocaleString('en-IN', {
@@ -355,8 +364,12 @@ const TransactionCard = ({ txn, groupName }) => {
         }
     };
 
-    const getSourceLabel = (type) => {
-        return type === 'collection' ? 'Player Payment' : 'Organizer Payout';
+    const getSourceLabel = (type, txnData = {}) => {
+        if (type === 'collection') {
+            if (txnData.settlementHeld === false || txnData.transferId) return 'Player Payment (Released)';
+            return 'Player Payment';
+        }
+        return 'Organizer Payout';
     };
 
     return (
@@ -370,7 +383,7 @@ const TransactionCard = ({ txn, groupName }) => {
                                 backgroundColor: txn.type === 'collection' ? '#e3f2fd' : '#fff3e0'
                             }]}
                         >
-                            {getSourceLabel(txn.type)}
+                            {getSourceLabel(txn.type, txn)}
                         </Chip>
                         <Text variant="bodySmall" style={styles.date}>
                             {formatDate(txn.createdAt || txn.webhookReceivedAt || txn.updatedAt)}
@@ -388,11 +401,11 @@ const TransactionCard = ({ txn, groupName }) => {
                 <Divider style={{ marginVertical: 15 }} />
 
                 <DataTable>
-                    {(txn.tournamentName || groupName) && (
+                    {txn.tournamentName && (
                         <DataTable.Row>
                             <DataTable.Cell>Tournament</DataTable.Cell>
                             <DataTable.Cell numeric>
-                                <Text style={{ fontWeight: 'bold', color: '#1565c0' }}>{txn.tournamentName || groupName}</Text>
+                                <Text style={{ fontWeight: 'bold', color: '#1565c0' }}>{txn.tournamentName}</Text>
                             </DataTable.Cell>
                         </DataTable.Row>
                     )}
@@ -406,11 +419,11 @@ const TransactionCard = ({ txn, groupName }) => {
                         </DataTable.Row>
                     )}
 
-                    {txn.receiver && (
+                    {(txn.receiver || organizerFallback) && (
                         <DataTable.Row>
                             <DataTable.Cell>Organizer</DataTable.Cell>
                             <DataTable.Cell numeric>
-                                {txn.receiver.name}
+                                {txn.receiver?.name || organizerFallback}
                             </DataTable.Cell>
                         </DataTable.Row>
                     )}
@@ -440,7 +453,6 @@ const TransactionCard = ({ txn, groupName }) => {
                         </DataTable.Cell>
                     </DataTable.Row>
 
-                    {/* Razorpay Payment ID for Refunds */}
                     {txn.razorpayPaymentId && (
                         <DataTable.Row>
                             <DataTable.Cell>
@@ -562,10 +574,13 @@ const styles = StyleSheet.create({
     groupPreview: {
         flexDirection: 'row',
         alignItems: 'center',
+        flexWrap: 'wrap',
+        marginTop: 4
     },
     previewText: {
         fontSize: 12,
         color: '#666',
+        marginRight: 8
     },
     expandedContent: {
         paddingHorizontal: 12,

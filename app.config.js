@@ -32,7 +32,7 @@ module.exports = {
         extra: {
             // Environment variables accessible via Constants.expoConfig.extra
             // This will use the key from .env file (test or live mode)
-            EXPO_PUBLIC_RAZORPAY_KEY_ID: process.env.EXPO_PUBLIC_RAZORPAY_KEY_ID || ""
+            EXPO_PUBLIC_RAZORPAY_KEY_ID: "rzp_live_S4UFro656NZEhB"
         }
     }
 };

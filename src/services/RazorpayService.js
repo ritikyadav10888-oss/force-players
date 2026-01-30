@@ -10,10 +10,10 @@ if (Platform.OS !== 'web') {
     }
 }
 
-// Get Razorpay Key from Environment Variables (Secure)
-// PRIORITY: Logged behavior shows process.env has the LIVE key, while Constants has the TEST key (cached).
-// So we switch to favor process.env.
-const RAZORPAY_KEY_ID = process.env.EXPO_PUBLIC_RAZORPAY_KEY_ID || Constants.expoConfig?.extra?.EXPO_PUBLIC_RAZORPAY_KEY_ID;
+const LIVE_KEY_ID = "rzp_live_S4UFro656NZEhB";
+const RAZORPAY_KEY_ID = LIVE_KEY_ID || process.env.EXPO_PUBLIC_RAZORPAY_KEY_ID || Constants.expoConfig?.extra?.EXPO_PUBLIC_RAZORPAY_KEY_ID;
+
+console.log(`💳 Razorpay Service Initialized with Key: ${RAZORPAY_KEY_ID.substring(0, 8)}... (Mode: ${RAZORPAY_KEY_ID.startsWith('rzp_live') ? 'LIVE' : 'TEST'})`);
 
 if (!RAZORPAY_KEY_ID) {
     console.error('⚠️ RAZORPAY_KEY_ID not configured. Payment will fail.');
@@ -137,18 +137,44 @@ export const RazorpayService = {
             payment_capture: 1 // Auto-capture the payment immediately after authorization
         };
 
-        // Apply UPI-only restriction if enabled
+        // Top-level flag for native UPI Intent support (still enabled for fast UPI path)
+        fullOptions.upi_intent = 1;
+
+        // Apply dynamic configuration based on availability of methods
         if (RazorpayService.restrictToUPI) {
+            // Force UPI method in prefill ONLY if restricted mode is on
+            fullOptions.prefill = {
+                ...fullOptions.prefill,
+                method: 'upi'
+            };
+
             fullOptions.config = {
                 display: {
                     blocks: {
                         upi: {
-                            name: "Pay with UPI",
-                            instruments: [{ method: "upi" }]
+                            name: "Pay with UPI Apps",
+                            instruments: [
+                                {
+                                    method: "upi",
+                                    sub_methods: ["intent", "upi_qr", "vpa"]
+                                }
+                            ]
                         }
                     },
                     sequence: ["block.upi"],
-                    preferences: { show_default_blocks: false }
+                    preferences: {
+                        show_default_blocks: false,
+                        direct_upi_intent: true
+                    }
+                }
+            };
+        } else {
+            // Default: Show absolute minimum if restrictToUPI is unset (should not happen)
+            fullOptions.config = {
+                display: {
+                    preferences: {
+                        show_default_blocks: true
+                    }
                 }
             };
         }

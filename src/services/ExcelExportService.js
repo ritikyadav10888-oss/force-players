@@ -1,4 +1,4 @@
-import * as FileSystem from 'expo-file-system';
+import * as FileSystem from 'expo-file-system/legacy';
 import * as Sharing from 'expo-sharing';
 import { Platform, Alert } from 'react-native';
 
@@ -123,7 +123,7 @@ export const exportPlayersToExcel = async (players, tournamentName = 'Tournament
             // Mobile: Save to file system and share
             const fileUri = FileSystem.documentDirectory + filename;
             await FileSystem.writeAsStringAsync(fileUri, csvContent, {
-                encoding: FileSystem.EncodingType.UTF8
+                encoding: 'utf8'
             });
 
             // Check if sharing is available

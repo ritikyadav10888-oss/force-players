@@ -13,9 +13,26 @@ const Razorpay = require('razorpay');
  * Secrets must be set: firebase functions:secrets:set RAZORPAY_KEY_ID RAZORPAY_KEY_SECRET
  */
 const getRazorpayInstance = (secrets) => {
+    // Robust trimming to prevent "Authentication failed" from trailing spaces/newlines
+    const keyId = (secrets.RAZORPAY_KEY_ID || "").trim();
+    const keySecret = (secrets.RAZORPAY_KEY_SECRET || "").trim();
+
+    // Debug logging (Masked)
+    if (keyId) {
+        console.log(`🔑 RZP Auth Check: ID=${keyId.substring(0, 8)}...${keyId.slice(-3)} (Len: ${keyId.length})`);
+    } else {
+        console.error("❌ RAZORPAY_KEY_ID is missing in process.env / secrets");
+    }
+
+    if (keySecret) {
+        console.log(`🔐 RZP Auth Check: Secret=${keySecret.substring(0, 4)}...${keySecret.slice(-3)} (Len: ${keySecret.length})`);
+    } else {
+        console.error("❌ RAZORPAY_KEY_SECRET is missing in process.env / secrets");
+    }
+
     return new Razorpay({
-        key_id: secrets.RAZORPAY_KEY_ID,
-        key_secret: secrets.RAZORPAY_KEY_SECRET,
+        key_id: keyId,
+        key_secret: keySecret,
     });
 };
 
@@ -407,23 +424,23 @@ exports.createPaymentWithRoute = onCall(
             }
 
             // Calculate split amounts (in paise)
-        // SECURITY: Use entryFee from database, ignore client-provided amount
-        const entryFee = Number(tournament.entryFee);
+            // SECURITY: Use entryFee from database, ignore client-provided amount
+            const entryFee = Number(tournament.entryFee);
 
-        if (isNaN(entryFee)) {
-            throw new HttpsError('failed-precondition', 'Tournament entry fee is not set');
-        }
+            if (isNaN(entryFee)) {
+                throw new HttpsError('failed-precondition', 'Tournament entry fee is not set');
+            }
 
-        if (entryFee === 0) {
-            throw new HttpsError('failed-precondition', 'Cannot create payment order for a free tournament');
-        }
+            if (entryFee === 0) {
+                throw new HttpsError('failed-precondition', 'Cannot create payment order for a free tournament');
+            }
 
-        // Verify client amount matches (optional but good for debugging)
-        if (Math.abs(Number(amount) - entryFee) > 1) {
-            console.warn(`⚠️ Client amount (${amount}) differs from DB entry fee (${entryFee})`);
-        }
+            // Verify client amount matches (optional but good for debugging)
+            if (Math.abs(Number(amount) - entryFee) > 1) {
+                console.warn(`⚠️ Client amount (${amount}) differs from DB entry fee (${entryFee})`);
+            }
 
-        const totalAmount = Math.round(entryFee * 100);
+            const totalAmount = Math.round(entryFee * 100);
             const organizerShare = Math.round(totalAmount * 0.95);
             const platformCommission = totalAmount - organizerShare;
 

@@ -9,6 +9,7 @@ import { useAuth } from '../../src/context/AuthContext';
 import DateTimePicker from '@react-native-community/datetimepicker';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
+import Toast from 'react-native-toast-message';
 
 const GAMES_DATA = [
     {
@@ -682,17 +683,29 @@ export default function CreateTournamentScreen() {
                 delete payload.createdAt;
                 delete payload.status;
                 await updateDoc(docRef, payload);
-                Alert.alert('Success', 'Tournament Updated!', [
-                    { text: 'OK', onPress: () => router.back() }
-                ]);
+
+                Toast.show({
+                    type: 'success',
+                    text1: '✅ Tournament Updated!',
+                    text2: 'Changes saved successfully',
+                    visibilityTime: 3000,
+                });
+
+                router.back();
             } else {
                 // Create
                 payload.createdBy = user.uid;
                 payload.createdAt = new Date().toISOString();
                 await addDoc(collection(db, 'tournaments'), payload);
-                Alert.alert('Success', 'Successfully tournament created', [
-                    { text: 'OK', onPress: () => router.back() }
-                ]);
+
+                Toast.show({
+                    type: 'success',
+                    text1: '✅ Tournament Created!',
+                    text2: 'Success: tournament created successfully',
+                    visibilityTime: 4000,
+                });
+
+                router.back();
             }
         } catch (error) {
             Alert.alert('Error', `Failed to save tournament: ${error.message}`);

@@ -98,7 +98,7 @@ export default function TournamentRegistrationScreen() {
     const { id, duoId } = useLocalSearchParams();
     const router = useRouter();
     const theme = useTheme();
-    const APP_VERSION = "1.1.2-DEBUG";
+    const APP_VERSION = "1.1.3-LIVE";
     const { user } = useAuth();
     const { width } = Dimensions.get('window');
     const isMobile = width < 768;
@@ -3000,41 +3000,17 @@ export default function TournamentRegistrationScreen() {
 
                                     <Divider style={{ marginVertical: 15 }} />
 
-                                    <View style={{ gap: 12 }}>
+                                    <View style={{ gap: 12, marginTop: 10 }}>
                                         <Button
                                             mode="contained"
                                             onPress={confirmPayment}
-                                            contentStyle={{ height: 50 }}
-                                            style={{ borderRadius: 12, backgroundColor: '#1A237E' }}
-                                            icon="qrcode-scan"
+                                            contentStyle={{ height: 55 }}
+                                            style={{ borderRadius: 16, backgroundColor: '#1A237E', elevation: 4 }}
+                                            labelStyle={{ fontSize: 16, fontWeight: 'bold' }}
+                                            icon="secure"
                                         >
-                                            Pay with UPI / QR
+                                            Pay ₹{tournament.entryFee} & Register
                                         </Button>
-
-
-                                    </View>
-
-                                    <View style={{ marginTop: 25, alignItems: 'center', backgroundColor: '#F8F9FE', padding: 15, borderRadius: 16, borderWidth: 1, borderColor: '#E8EAF6' }}>
-                                        <Text style={{ fontSize: 11, color: '#7986CB', fontWeight: 'bold', marginBottom: 12, letterSpacing: 1 }}>SECURE PAYMENT GATEWAY</Text>
-                                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 20 }}>
-                                            <View style={{ alignItems: 'center' }}>
-                                                <MaterialCommunityIcons name="google" size={30} color="#5F6368" />
-                                                <Text style={{ fontSize: 9, color: '#666', marginTop: 4 }}>GPay</Text>
-                                            </View>
-                                            <View style={{ alignItems: 'center' }}>
-                                                <MaterialCommunityIcons name="alpha-p-circle" size={28} color="#673AB7" />
-                                                <Text style={{ fontSize: 9, color: '#666', marginTop: 4 }}>PhonePe</Text>
-                                            </View>
-                                            <View style={{ alignItems: 'center' }}>
-                                                <MaterialCommunityIcons name="qrcode-scan" size={26} color="#1A237E" />
-                                                <Text style={{ fontSize: 9, color: '#666', marginTop: 4 }}>Any UPI</Text>
-                                            </View>
-                                        </View>
-                                        <Divider style={{ width: '100%', marginVertical: 12 }} />
-                                        <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-                                            <MaterialCommunityIcons name="shield-check" size={16} color="#2E7D32" style={{ marginRight: 6 }} />
-                                            <Text style={{ fontSize: 11, color: '#2E7D32', fontWeight: '500' }}>100% Encrypted & Secure Payments</Text>
-                                        </View>
                                     </View>
                                 </Surface>
                             )}
@@ -3213,5 +3189,8 @@ const styles = StyleSheet.create({
     iconCircle: { width: 40, height: 40, borderRadius: 20, justifyContent: 'center', alignItems: 'center' },
     dropdownTrigger: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', borderWidth: 1, borderColor: '#ccc', borderRadius: 8, padding: 12, marginTop: 5, backgroundColor: 'white' },
     infoBox: { flexDirection: 'row', padding: 12, backgroundColor: '#E3F2FD', borderRadius: 8, alignItems: 'center' },
-    errorText: { color: '#B00020', fontSize: 11, marginTop: -8, marginBottom: 8, marginLeft: 5 }
+    errorText: { color: '#B00020', fontSize: 11, marginTop: -8, marginBottom: 8, marginLeft: 5 },
+    upiAppButton: { flex: 1, backgroundColor: 'white', borderRadius: 16, padding: 12, alignItems: 'center', borderWidth: 1, borderColor: '#E8EAF6', elevation: 2, shadowColor: '#000', shadowOffset: { width: 0, height: 1 }, shadowOpacity: 0.1, shadowRadius: 2 },
+    upiAppLogo: { width: 40, height: 40, marginBottom: 8 },
+    upiAppText: { fontSize: 10, fontWeight: 'bold', color: '#1A237E' }
 });

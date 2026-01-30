@@ -879,7 +879,7 @@ export default function OrganizerDashboard() {
 
                                         // Add settled tournaments that don't have a record in financial_statements yet
                                         tournaments.forEach(t => {
-                                            if (t.settlementStatus === 'completed') {
+                                            if (['completed', 'released', 'partial_release'].includes(t.settlementStatus)) {
                                                 const hasRecord = payouts.some(p => p.tournamentId === t.id);
                                                 if (!hasRecord) {
                                                     list.push({

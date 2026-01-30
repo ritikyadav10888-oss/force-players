@@ -6,6 +6,7 @@ import { collection, getDocs, orderBy, query, getCountFromServer, doc, deleteDoc
 import { db } from '../../src/config/firebase';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { exportTournamentPlayers } from '../../src/services/ExcelExportService';
+import Toast from 'react-native-toast-message';
 
 const TournamentCard = ({ item, onDelete, deletingId }) => {
     const theme = useTheme();
@@ -306,8 +307,12 @@ export default function TournamentsScreen() {
         try {
             await deleteDoc(doc(db, 'tournaments', id));
             await fetchTournaments();
-            if (Platform.OS === 'web') alert("Tournament deleted successfully.");
-            else Alert.alert("Success", "Tournament deleted successfully.");
+            Toast.show({
+                type: 'success',
+                text1: '🗑️ Tournament Deleted',
+                text2: 'The tournament has been removed permanentally.',
+                visibilityTime: 3000,
+            });
         } catch (error) {
             console.error("Delete Error:", error);
             if (Platform.OS === 'web') alert("Failed: " + error.message);

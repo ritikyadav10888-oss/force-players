@@ -359,7 +359,7 @@ export default function OwnerDashboard() {
                     }
                 }
 
-                if (data.settlementStatus === 'completed') {
+                if (['completed', 'released', 'partial_release'].includes(data.settlementStatus)) {
                     settledList.push(data);
                 } else {
                     pendingSettlements.push(data);
@@ -745,28 +745,60 @@ export default function OwnerDashboard() {
                     contentContainerStyle={styles.content}
                     refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} colors={['#3F51B5']} />}
                 >
-                    {/* Financial Summary */}
-                    <Title style={styles.sectionTitle}>Financial Summary</Title>
-                    <View style={styles.summaryGrid}>
-                        <Surface style={styles.summaryBox} elevation={2}>
-                            <Text style={styles.summaryLabel}>Total Collected</Text>
-                            <Text style={[styles.summaryValueSmall, { color: '#1a237e' }]}>
-                                ₹{Math.round(statements.reduce((sum, s) => sum + (s.totalCollected || 0), 0)).toLocaleString('en-IN')}
-                            </Text>
-                        </Surface>
-                        <Surface style={styles.summaryBox} elevation={2}>
-                            <Text style={styles.summaryLabel}>Commission (5%)</Text>
-                            <Text style={[styles.summaryValueSmall, { color: '#1a237e' }]}>
-                                ₹{Math.round(statements.reduce((sum, s) => sum + (s.platformCommission || 0), 0)).toLocaleString('en-IN')}
-                            </Text>
-                        </Surface>
-                        <Surface style={styles.summaryBox} elevation={2}>
-                            <Text style={styles.summaryLabel}>Paid to Org</Text>
-                            <Text style={[styles.summaryValueSmall, { color: '#2e7d32' }]}>
-                                ₹{Math.round(statements.reduce((sum, s) => sum + (s.organizerShare || 0), 0)).toLocaleString('en-IN')}
-                            </Text>
-                        </Surface>
-                    </View>
+                    {(() => {
+                        // Create a unified list of settled records for BOTH Summary and History
+                        const unifiedSettlements = [...statements];
+
+                        settledTournaments.forEach(t => {
+                            const hasStatement = statements.some(s => s.tournamentId === t.id);
+                            if (!hasStatement) {
+                                unifiedSettlements.push({
+                                    id: `temp-${t.id}`,
+                                    tournamentId: t.id,
+                                    tournamentName: t.name,
+                                    settlementDate: t.settlementReleasedAt || t.settlementDate || new Date().toISOString(),
+                                    organizerName: "Processing...",
+                                    organizerShare: t.totalReleasedAmount || t.settlementAmount || (t.totalCollections * 0.95),
+                                    platformCommission: (t.totalCollections * 0.05),
+                                    totalCollected: t.totalCollections || (t.totalReleasedAmount / 0.95),
+                                    invoiceNumber: "SYNCING",
+                                    transferId: t.settlementTransactionId || "Processing",
+                                    isSyncing: true
+                                });
+                            }
+                        });
+
+                        const totalCollectedSum = unifiedSettlements.reduce((sum, s) => sum + (Number(s.totalCollected) || 0), 0);
+                        const totalCommissionSum = unifiedSettlements.reduce((sum, s) => sum + (Number(s.platformCommission) || 0), 0);
+                        const totalPaidSum = unifiedSettlements.reduce((sum, s) => sum + (Number(s.organizerShare) || 0), 0);
+
+                        return (
+                            <>
+                                {/* Financial Summary */}
+                                <Title style={styles.sectionTitle}>Financial Summary</Title>
+                                <View style={styles.summaryGrid}>
+                                    <Surface style={styles.summaryBox} elevation={2}>
+                                        <Text style={styles.summaryLabel}>Total Collected</Text>
+                                        <Text style={[styles.summaryValueSmall, { color: '#1a237e' }]}>
+                                            ₹{Math.round(totalCollectedSum).toLocaleString('en-IN')}
+                                        </Text>
+                                    </Surface>
+                                    <Surface style={styles.summaryBox} elevation={2}>
+                                        <Text style={styles.summaryLabel}>Commission (5%)</Text>
+                                        <Text style={[styles.summaryValueSmall, { color: '#1a237e' }]}>
+                                            ₹{Math.round(totalCommissionSum).toLocaleString('en-IN')}
+                                        </Text>
+                                    </Surface>
+                                    <Surface style={styles.summaryBox} elevation={2}>
+                                        <Text style={styles.summaryLabel}>Paid to Org</Text>
+                                        <Text style={[styles.summaryValueSmall, { color: '#2e7d32' }]}>
+                                            ₹{Math.round(totalPaidSum).toLocaleString('en-IN')}
+                                        </Text>
+                                    </Surface>
+                                </View>
+                            </>
+                        );
+                    })()}
 
                     <Title style={[styles.sectionTitle, { marginTop: 20 }]}>Pending Payouts</Title>
                     {completedTournaments.length === 0 ? (
@@ -813,11 +845,9 @@ export default function OwnerDashboard() {
 
                     <Title style={[styles.sectionTitle, { marginTop: 30 }]}>Settlement History</Title>
                     {(() => {
-                        // Create a unified list of settled records
-                        // 1. Start with actual financial statements
+                        // Re-use logic to build the unified list for the display
                         const list = [...statements];
 
-                        // 2. Add tournaments that are marked 'settled' but don't have a statement record yet
                         settledTournaments.forEach(t => {
                             const hasStatement = statements.some(s => s.tournamentId === t.id);
                             if (!hasStatement) {
@@ -825,12 +855,12 @@ export default function OwnerDashboard() {
                                     id: `temp-${t.id}`,
                                     tournamentId: t.id,
                                     tournamentName: t.name,
-                                    settlementDate: t.settlementDate || new Date().toISOString(),
+                                    settlementDate: t.settlementReleasedAt || t.settlementDate || new Date().toISOString(),
                                     organizerName: "Processing...",
-                                    organizerShare: t.settlementAmount || (t.totalCollections * 0.95),
+                                    organizerShare: t.totalReleasedAmount || t.settlementAmount || (t.totalCollections * 0.95),
                                     platformCommission: (t.totalCollections * 0.05),
                                     invoiceNumber: "SYNCING",
-                                    transferId: "Pending Confirmation",
+                                    transferId: t.settlementTransactionId || "Processing",
                                     isSyncing: true
                                 });
                             }
@@ -845,9 +875,12 @@ export default function OwnerDashboard() {
                             );
                         }
 
+                        // Sort by date descending
+                        list.sort((a, b) => new Date(b.settlementDate) - new Date(a.settlementDate));
+
                         return list.map((s) => (
                             <Surface key={s.id} style={[styles.organizerCard, { borderLeftWidth: 4, borderLeftColor: s.isSyncing ? '#FF9800' : '#4CAF50' }]} elevation={1}>
-                                <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 8 }}>
+                                <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 8, flexWrap: 'wrap' }}>
                                     <View style={{ flex: 1 }}>
                                         <Text style={{ fontWeight: 'bold', fontSize: 16, color: '#1a1a1a' }}>{s.tournamentName}</Text>
                                         <Text style={{ color: 'gray', fontSize: 12 }}>
