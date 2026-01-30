@@ -299,6 +299,13 @@ exports.createOrganizer = onCall(
 
         const { email, password, name, phone, bankDetails } = request.data;
 
+        // Rigorous Input Validation
+        if (!email || !email.includes('@')) throw new HttpsError('invalid-argument', 'Invalid email address');
+        if (!password || password.length < 6) throw new HttpsError('invalid-argument', 'Password must be at least 6 characters');
+        if (!name || name.length < 2) throw new HttpsError('invalid-argument', 'Name is too short');
+        if (!phone || phone.length < 10) throw new HttpsError('invalid-argument', 'Invalid phone number');
+        if (!bankDetails || !bankDetails.ifsc || !bankDetails.accountNumber) throw new HttpsError('invalid-argument', 'Bank details are incomplete');
+
         try {
             // Create Firebase Auth User
             const userRecord = await admin.auth().createUser({
@@ -1164,9 +1171,8 @@ exports.processPlayerRefund = onCall(
 
             const tournament = tournamentDoc.data();
 
-            // Check if user is owner or organizer of this tournament
-            const userDoc = await db.collection('users').doc(request.auth.uid).get();
-            const userRole = userDoc.data()?.role;
+            // SECURITY: Use token role for faster/more secure verification
+            const userRole = request.auth.token.role;
             const isOwner = userRole === 'owner' || userRole === 'admin';
             const isOrganizer = userRole === 'organizer' && tournament.organizerId === request.auth.uid;
 

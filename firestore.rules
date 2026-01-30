@@ -34,6 +34,11 @@ service cloud.firestore {
       );
     }
 
+    function isTournamentOrganizer(tournamentId) {
+      return isOrganizer() && 
+             get(/databases/$(database)/documents/tournaments/$(tournamentId)).data.organizerId == request.auth.uid;
+    }
+
     function isValidEmail(email) {
       return email.matches('^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$');
     }
@@ -51,7 +56,7 @@ service cloud.firestore {
     // ============================================
 
     match /users/{userId} {
-      allow read: if isSignedIn(); 
+      allow read: if isSignedIn() && (request.auth.uid == userId || isOwner()); 
       allow create: if isSignedIn() && (
         (request.auth.uid == userId && 
          (request.resource.data.role == 'player' || !('role' in request.resource.data)) &&
@@ -107,9 +112,9 @@ service cloud.firestore {
         
         allow read: if isSignedIn() && (
           isOwner() || 
-          (isOrganizer() && resource.data.tournamentId == tournamentId) ||
+          isTournamentOrganizer(tournamentId) ||
           request.auth.uid == resource.data.userId || 
-          request.auth.token.email == resource.data.email
+          (request.auth.token.email != null && request.auth.token.email == resource.data.email)
         );
 
         allow update: if isOwner() || (
@@ -157,7 +162,7 @@ service cloud.firestore {
       allow create: if isSignedIn() && 
                        isValidSize() &&
                        'to' in request.resource.data &&
-                       isValidEmail(request.resource.data.to);
+                       (isOwner() || request.resource.data.to == request.auth.token.email);
       allow read, update, delete: if isOwner();
     }
 
