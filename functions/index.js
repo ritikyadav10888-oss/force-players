@@ -379,27 +379,35 @@ exports.createPaymentWithRoute = onCall(
     },
     async (request) => {
         const { tournamentId, playerId, amount, playerName, transactionId } = request.data;
-        console.log(`📦 createPaymentWithRoute: playerId=${playerId} (Type=${typeof playerId}), tourneyId=${tournamentId}, amt=${amount}`);
+        console.log(`📦 createPaymentWithRoute: playerId=${playerId}, tourneyId=${tournamentId}, authUid=${request.auth?.uid}`);
 
-        if (!playerId || playerId === 'null' || playerId === 'undefined' || playerId === 'null' || playerId === 'undefined' || (typeof playerId === 'object' && !playerId)) {
-            console.error("❌ CRITICAL: playerId is missing or invalid on server:", {
-                value: playerId,
-                type: typeof playerId,
-                raw: request.data
-            });
+        // SECURITY: Enforce Authentication
+        if (!request.auth || !request.auth.uid) {
+            throw new HttpsError('unauthenticated', 'User must be authenticated to register');
+        }
+
+        if (!playerId || playerId === 'null' || playerId === 'undefined') {
             throw new HttpsError('invalid-argument', 'Missing playerId');
         }
 
         if (!tournamentId || tournamentId === 'null' || tournamentId === 'undefined') {
-            console.error("❌ Missing tournamentId:", tournamentId);
             throw new HttpsError('invalid-argument', 'Missing tournamentId');
-        }
-        if (!amount || isNaN(parseFloat(amount))) {
-            console.error("❌ Missing or invalid amount:", amount);
-            throw new HttpsError('invalid-argument', 'Missing or invalid amount');
         }
 
         try {
+            // SECURITY: Check for existing successful payment to prevent duplicates
+            const playerRef = db.collection('tournaments').doc(tournamentId).collection('players').doc(playerId);
+            const playerDoc = await playerRef.get();
+
+            if (!playerDoc.exists) {
+                throw new HttpsError('not-found', 'Player registration not found. Please fill the form first.');
+            }
+
+            const playerData = playerDoc.data();
+            if (playerData.paid === true) {
+                throw new HttpsError('already-exists', 'You have already completed the payment for this tournament.');
+            }
+
             // Get tournament details
             const tournamentDoc = await db.collection('tournaments').doc(tournamentId).get();
             if (!tournamentDoc.exists) {
@@ -407,6 +415,13 @@ exports.createPaymentWithRoute = onCall(
             }
 
             const tournament = tournamentDoc.data();
+
+            // SECURITY: Check Tournament Capacity
+            const maxPlayers = Number(tournament.maxPlayers || tournament.slots || 0);
+            const currentPlayers = Number(tournament.paidPlayerCount || 0);
+            if (maxPlayers > 0 && currentPlayers >= maxPlayers) {
+                throw new HttpsError('resource-exhausted', 'This tournament is already full. No further payments accepted.');
+            }
 
             // Get organizer's linked account
             const organizerDoc = await db.collection('users').doc(tournament.organizerId).get();
