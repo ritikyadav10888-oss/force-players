@@ -1,0 +1,13 @@
+{
+  "projects": {
+    "default": "force-player-register-ap-ade3a"
+  },
+  "targets": {},
+  "etags": {
+    "force-player-register-ap-ade3a": {
+      "extensionInstances": {
+        "firestore-send-email": "d311214dbd318ae8de93af63beceb2511f3cc5212e910e74962a0ccd13c34c23"
+      }
+    }
+  }
+}
