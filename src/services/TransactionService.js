@@ -94,7 +94,6 @@ export const TransactionService = {
         try {
             const verifyFn = httpsCallable(functions, 'verifyPayment');
             const result = await verifyFn(data);
-            console.log("✅ Payment verified:", result.data);
             return result.data;
         } catch (error) {
             console.error("❌ Payment verification failed:", error);

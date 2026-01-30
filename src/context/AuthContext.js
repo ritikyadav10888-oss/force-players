@@ -38,7 +38,7 @@ export const AuthProvider = ({ children }) => {
                             const today = new Date();
                             const expiry = new Date(data.accessExpiryDate);
                             if (today > expiry) {
-                                console.warn("Access expired for user:", currentUser.email);
+                                console.warn("Access expired for user");
                                 await signOut(auth);
                                 alert("Your access to this platform has expired.");
                                 return;
@@ -77,7 +77,6 @@ export const AuthProvider = ({ children }) => {
             if (userData && userData.role === 'organizer' && userData.accessExpiryDate) {
                 const expiry = new Date(userData.accessExpiryDate);
                 if (new Date() > expiry) {
-                    console.log("Session expired background check for:", userData.email);
                     await logout();
                     alert("Your session has expired. Please contact the administrator.");
                 }

@@ -10,10 +10,7 @@ if (Platform.OS !== 'web') {
     }
 }
 
-const LIVE_KEY_ID = "rzp_live_S4UFro656NZEhB";
-const RAZORPAY_KEY_ID = LIVE_KEY_ID || process.env.EXPO_PUBLIC_RAZORPAY_KEY_ID || Constants.expoConfig?.extra?.EXPO_PUBLIC_RAZORPAY_KEY_ID;
-
-console.log(`💳 Razorpay Service Initialized with Key: ${RAZORPAY_KEY_ID.substring(0, 8)}... (Mode: ${RAZORPAY_KEY_ID.startsWith('rzp_live') ? 'LIVE' : 'TEST'})`);
+const RAZORPAY_KEY_ID = process.env.EXPO_PUBLIC_RAZORPAY_KEY_ID || Constants.expoConfig?.extra?.EXPO_PUBLIC_RAZORPAY_KEY_ID;
 
 if (!RAZORPAY_KEY_ID) {
     console.error('⚠️ RAZORPAY_KEY_ID not configured. Payment will fail.');
@@ -61,10 +58,8 @@ export const RazorpayService = {
             });
 
             if (result.data.success) {
-                console.log('✅ Order created:', result.data.orderId);
-
                 if (result.data.kycWarning) {
-                    console.warn('⚠️', result.data.kycWarning);
+                    console.warn('⚠️ KYC Warning received');
                 }
 
                 return result.data;
@@ -83,12 +78,10 @@ export const RazorpayService = {
      * @returns {Promise} - Resolves with payment ID on success
      */
     openCheckout: async (options) => {
-        const VERSION = "1.0.3-HARDENED";
-        console.log(`🚀 [RazorpayService v${VERSION}] Opening Checkout...`);
         const amount = parseFloat(options.amount);
 
         if (isNaN(amount) || amount <= 0) {
-            console.error("Invalid amount for Razorpay:", options.amount);
+            console.error("Invalid amount for Razorpay");
             Alert.alert("Error", "Invalid payment amount");
             return Promise.reject(new Error("Invalid amount"));
         }
@@ -204,7 +197,6 @@ export const RazorpayService = {
                         },
                         modal: {
                             ondismiss: () => {
-                                console.log("Razorpay Payment Modal Dismissed");
                                 reject(new Error('Payment Cancelled by User'));
                             }
                         }
@@ -244,11 +236,9 @@ export const RazorpayService = {
             const functions = getFunctions();
             const releaseSettlement = httpsCallable(functions, 'releaseSettlement');
 
-            console.log('🔓 Releasing settlement for tournament:', tournamentId);
             const result = await releaseSettlement({ tournamentId });
 
             if (result.data.success) {
-                console.log(`✅ Released ${result.data.releasedCount} settlements`);
                 return result.data;
             } else {
                 throw new Error('Failed to release settlement');
