@@ -649,6 +649,7 @@ export default function CreateTournamentScreen() {
             const payload = {
                 name,
                 gameName: finalGameName,
+                sport: finalGameName.toLowerCase(),
                 gameCategory,
                 tournamentType, // Normal / Auction / Team
                 entryType,      // Solo / Duo / Team / Hybrid

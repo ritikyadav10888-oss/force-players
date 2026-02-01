@@ -138,6 +138,20 @@ service cloud.firestore {
         
         allow delete: if isOwner();
       }
+
+      match /teams/{teamId} {
+        allow read: if true;
+        allow create: if (isTournamentOrganizer(tournamentId) || isOwner()) && isValidSize();
+        allow update: if (isTournamentOrganizer(tournamentId) || isOwner()) && isValidSize();
+        allow delete: if isTournamentOrganizer(tournamentId) || isOwner();
+      }
+
+      match /matches/{matchId} {
+        allow read: if true;
+        allow create: if (isTournamentOrganizer(tournamentId) || isOwner()) && isValidSize();
+        allow update: if (isTournamentOrganizer(tournamentId) || isOwner()) && isValidSize();
+        allow delete: if isTournamentOrganizer(tournamentId) || isOwner();
+      }
     }
 
     match /master_players/{playerEmail} {

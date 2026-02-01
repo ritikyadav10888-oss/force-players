@@ -364,6 +364,22 @@ export default function TournamentPlayersScreen() {
                     <Chip icon="account-group" compact style={styles.chip}>{players.length} Registered</Chip>
                     <Chip icon="shield-account" compact style={styles.chip}>{displayData.filter(i => i.type === 'team').length} Teams</Chip>
                 </View>
+                <View style={{flexDirection: 'row', justifyContent: 'center', gap: 10, marginBottom: 10, marginTop: 5}}>
+                    <Button
+                        mode="contained-tonal"
+                        icon="shield-edit"
+                        onPress={() => router.push(`/(organizer)/teams/${id}`)}
+                    >
+                        Teams
+                    </Button>
+                    <Button
+                        mode="contained-tonal"
+                        icon="calendar-clock"
+                        onPress={() => router.push(`/(organizer)/matches/${id}`)}
+                    >
+                        Matches
+                    </Button>
+                </View>
             </Surface>
 
             {loading ? (
