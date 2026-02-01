@@ -1726,7 +1726,10 @@ export default function TournamentRegistrationScreen() {
                         <LinearGradient colors={['#311b92', '#6200ea']} style={styles.headerGradient}>
                             <View style={styles.headerTop}>
                                 <Button icon="arrow-left" mode="text" textColor="white" onPress={() => router.back()}>Back</Button>
-                                <Chip icon="trophy" style={{ backgroundColor: 'rgba(255,255,255,0.2)' }} textStyle={{ color: 'white' }}>{tournament.tournamentType}</Chip>
+                                <View style={{flexDirection: 'row', alignItems: 'center'}}>
+                                    <Button mode="contained" compact style={{marginRight: 10, backgroundColor: 'white'}} textColor="#311b92" onPress={() => router.push(`/tournament/${id}/live`)}>Live Scores</Button>
+                                    <Chip icon="trophy" style={{ backgroundColor: 'rgba(255,255,255,0.2)' }} textStyle={{ color: 'white' }}>{tournament.tournamentType}</Chip>
+                                </View>
                             </View>
                             <Title style={styles.headerTitle}>{tournament.name}</Title>
                             <Text style={styles.headerSubtitle}><MaterialCommunityIcons name="gamepad-variant" /> {tournament.gameName} · {tournament.entryType} Entry</Text>

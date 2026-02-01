@@ -47,5 +47,10 @@
   "private": true,
   "devDependencies": {
     "babel-plugin-transform-inline-environment-variables": "^0.4.4"
+  },
+  "overrides": {
+    "fast-xml-parser": "5.3.4",
+    "tar": "7.5.7",
+    "undici": "6.23.0"
   }
 }
